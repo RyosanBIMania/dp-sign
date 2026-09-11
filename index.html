@@ -35,9 +35,21 @@
       この端末の localStorage に残すのは「合言葉」と「一覧の控え」だけ。
     - 相手のスマホから ?doc=<契約ID>&t=<閲覧トークン> で開いて署名できる。
 
-  ■ v0.4 で足したもの（今回）
+  ■ v0.5 で変えたもの（今回）
+    - アプリからのメール自動送信をやめた。［この内容でメールを送る］のボタンと
+      onSendMail / doSendMail を消し、画面から callGas('sendmail', …) を呼ばなくした。
+      理由：自社ドメインの SPF に Google が入っておらず、窓口（Google）から
+      info@data-parade.com を名乗って送ると相手の迷惑メールに入るため。
+      ※ 窓口（gas-code.gs）側の送信機能はそのまま残してある。画面から呼ばないだけ。
+    - 代わりに「貼り付けるだけの文面」を3種類に増やした。
+      (a) メールの件名 (b) メールの本文（件名の行は含めない） (c) チャット用の短い文面
+      それぞれに専用のコピーボタンを付けた。件名と本文を分けたのは Gmail の入力欄が別だから。
+    - (c) には確認コードを入れない。リンクとコードを同じ経路で送らないための作り。
+    - 確認コードの注意書きを、コードの表示のすぐ下に移した（結果カード・一覧カードとも）。
+
+  ■ v0.4 で足したもの
     - 保存先を Google Apps Script の窓口（スプレッドシート）に移した
-    - 相手へのメール送信（窓口が Gmail から送る）
+    - 相手へのメール送信（窓口が Gmail から送る）※ v0.5 で画面から外した
     - 確認コードの回数数えをサーバー側に移した（相手のブラウザでは数えない）
     - 通信中の表示・二重送信の防止・20秒の待ち切り
     - 試作の名残（端末内保存の注意書き・コードの覗き見表示）を削除
@@ -49,7 +61,7 @@
     - 契約番号を UUID 形式に（新規作成分から）
     - 開封日時の記録（署名画面を最初に開いた時刻）
     - 署名は「氏名から自動生成」が既定。手書きは切り替えたときだけ
-    - 相手に送るメール文案の生成とコピー
+    - 相手に送る文案の生成とコピー（v0.5 で件名・本文・チャットの3種類に）
     - 業務委託契約書の雛形を準委任向けに改訂（報酬の形3種・貸与品・顧客情報の秘密保持）
     - 用途は「当社が発注する側」の契約。相手は個人・小規模の業務委託先を想定。
       大手クライアントとの基本契約には使わない。
@@ -540,6 +552,24 @@ ul{margin:0;padding:0;list-style:none;}
   color:var(--c-text);padding:var(--sp-3);resize:vertical;
 }
 .mailtext[hidden]{display:none !important;}
+/* チャット用は短いので枠も低くする */
+.mailtext--chat{min-height:150px;}
+
+/* 1行だけの文面（メールの件名）。textarea ではなく input で出す */
+.copyline{
+  width:100%;min-height:var(--tap);
+  font-family:var(--f-mono);font-size:var(--fs-sm);
+  background:#ffffff;border:1px solid var(--c-field-line);border-radius:var(--r-sm);
+  color:var(--c-text);padding:var(--sp-2) var(--sp-3);
+}
+.copyline[hidden]{display:none !important;}
+
+/* 文面ブロックの見出し（メールの件名／メールの本文／チャット用） */
+.copylabel{
+  font-size:var(--fs-xs);font-weight:700;letter-spacing:.08em;
+  color:var(--c-navy);margin-bottom:var(--sp-2);
+}
+.copylabel[hidden]{display:none !important;}
 
 /* モーダル（確認ダイアログ。window.confirm は使わない） */
 .modal{
@@ -868,7 +898,7 @@ ul{margin:0;padding:0;list-style:none;}
       <div class="field">
         <label class="field__label" for="fPartyEmail">相手先メールアドレス</label>
         <input class="input" type="email" id="fPartyEmail" placeholder="例）sample@example.com" autocomplete="off">
-        <div class="field__hint">この住所に契約書のご案内メールを送ります（送信は当社の窓口が行います）。</div>
+        <div class="field__hint">契約の控えに残します。ご案内はこのアプリで作った文面を、ご自分のメールから送ってください。</div>
       </div>
 
       <div class="field">
@@ -908,7 +938,7 @@ ul{margin:0;padding:0;list-style:none;}
       <div class="field">
         <label class="field__label" for="fDeadline">手続きの完了期限</label>
         <input class="input" type="date" id="fDeadline">
-        <div class="field__hint">既定は作成日の14日後です。メール文案に入ります。</div>
+        <div class="field__hint">既定は作成日の14日後です。送る文面に入ります。</div>
       </div>
 
       <div class="field">
@@ -948,30 +978,42 @@ ul{margin:0;padding:0;list-style:none;}
         <div class="btn-row" style="margin-top:var(--sp-3);">
           <button class="btn btn--sm" type="button" data-copy="code">コードをコピー</button>
         </div>
+        <div class="notice notice--info" style="margin-top:var(--sp-3);margin-bottom:0;">
+          確認コードは、契約書のリンクとは<strong>別の経路</strong>でお伝えください
+          （リンクはメールやチャット、コードは電話や口頭など）。
+          同じ経路で送ると本人確認の意味が薄れます。
+        </div>
       </div>
 
-      <div class="notice notice--info">
-        URLと4桁コードは<strong>別々の経路</strong>で渡してください（URLはメール、コードは電話やSMSなど）。
-        同じ経路で送ると本人確認の意味が薄れます。
+      <h2 class="sec-title" style="margin-top:var(--sp-5);">送る文面</h2>
+      <div class="field__hint" style="margin-bottom:var(--sp-3);">
+        この文面をコピーして、いつものメールやチャットから送ってください。
+        このアプリからは送りません。
       </div>
 
-      <h2 class="sec-title" style="margin-top:var(--sp-5);">メール文案</h2>
+      <div class="copylabel">メールの件名</div>
+      <input class="copyline" type="text" id="resultSubject" readonly>
+      <input class="fallback-input" type="text" id="resultSubjectFallback" readonly hidden>
+      <div class="btn-row" style="margin-top:var(--sp-2);">
+        <button class="btn btn--sm" type="button" data-copy="subject">件名をコピー</button>
+      </div>
+
+      <div class="copylabel" style="margin-top:var(--sp-4);">メールの本文</div>
       <textarea class="mailtext" id="resultMail" readonly></textarea>
       <input class="fallback-input" type="text" id="resultMailFallback" readonly hidden>
-      <div class="btn-row" style="margin-top:var(--sp-3);">
-        <button class="btn btn--sm" type="button" data-copy="mail">メール文案をコピー</button>
-      </div>
-      <div class="field__hint" style="margin-top:var(--sp-2);">
-        ※確認コードは電話やチャットなど別の経路でお伝えするとより安全です。
+      <div class="btn-row" style="margin-top:var(--sp-2);">
+        <button class="btn btn--sm" type="button" data-copy="mail">本文をコピー</button>
       </div>
 
-      <div class="btn-row" style="margin-top:var(--sp-4);">
-        <button class="btn btn--primary btn--block" type="button" id="btnSendMail">この内容でメールを送る</button>
+      <div class="copylabel" style="margin-top:var(--sp-4);">チャット用の短い文面</div>
+      <textarea class="mailtext mailtext--chat" id="resultChat" readonly></textarea>
+      <input class="fallback-input" type="text" id="resultChatFallback" readonly hidden>
+      <div class="btn-row" style="margin-top:var(--sp-2);">
+        <button class="btn btn--sm" type="button" data-copy="chat">チャット文面をコピー</button>
       </div>
       <div class="field__hint" style="margin-top:var(--sp-2);">
-        ※確認コードはメールに書かれていません。電話やチャットで別にお伝えください。
+        ※チャット用の文面に確認コードは入っていません。コードは別にお伝えください。
       </div>
-      <div class="msg" id="sendMailMsg" hidden></div>
     </div>
 
   </section>
@@ -2149,18 +2191,26 @@ function buildContractText(c) {
 }
 
 /* ---------------------------------------------------------------------------
-   相手に送るメールの文案
+   相手に送る文面（3種類）
    ---------------------------------------------------------------------------
-   Gmail にそのまま貼れるプレーンテキスト。件名も1行目に入れてある。
+   v0.5 でアプリからの自動送信をやめた。社長が自分のメールソフトやチャットから
+   手で送るので、ここは「貼り付けるだけの文面」を作るだけにしてある。
+     (a) buildMailSubject … メールの件名（1行）
+     (b) buildMailBody    … メールの本文（件名の行は含めない）
+     (c) buildChatText    … チャット用の短い文面
+   (c) には確認コードを絶対に入れない。リンクとコードを同じ経路で送らないため。
 --------------------------------------------------------------------------- */
-function buildMailText(c) {
+
+/** (a) メールの件名。［DPサイン］はカタカナのまま（社長の決めた文言。変えない） */
+function buildMailSubject(c) {
+  return '［DPサイン］' + COMPANY_NAME + 'より契約書の対応依頼です';
+}
+
+/** (b) メールの本文。Gmail の本文欄にそのまま貼れるプレーンテキスト */
+function buildMailBody(c) {
   var title = contractTitle(c);
   var deadline = c.deadline ? formatDate(c.deadline) : '（未設定）';
-  /* 件名の［DPサイン］はカタカナのまま。窓口（gas-code.gs）が実際に送る件名と
-     食い違わないようにするため、ここは合わせてある。 */
   return [
-    '件名：［DPサイン］' + COMPANY_NAME + 'より契約書の対応依頼です',
-    '',
     (c.partyName || '（相手先名）') + ' 様',
     '',
     COMPANY_NAME + 'より電子契約書「' + title + '」をお送りします。',
@@ -2181,6 +2231,23 @@ function buildMailText(c) {
     '本メールは ' + COMPANY_NAME + ' が運用する電子契約の仕組みから',
     'ご案内しているものです。',
     'このメールに心当たりがない場合は、お手数ですが送信者へ直接お問い合わせください。'
+  ].join('\n');
+}
+
+/** (c) チャット用の短い文面。LINE や Slack に貼る想定。
+    読まれにくくなるので、区切り線と定型の注意書きは入れない。
+    確認コードもここには入れない（リンクとコードは別の経路で渡す）。 */
+function buildChatText(c) {
+  var title = contractTitle(c);
+  var deadline = c.deadline ? formatDate(c.deadline) : '（未設定）';
+  return [
+    COMPANY_NAME + 'より「' + title + '」をお送りします。',
+    '下記を開いて、ご確認とご署名をお願いいたします。',
+    '',
+    signUrlFor(c.id, c.token),
+    '',
+    'お手続きの期限：' + deadline,
+    '確認コード（4桁）はこのあと別にお送りします。'
   ].join('\n');
 }
 
@@ -2318,58 +2385,6 @@ function onPing() {
     var box = $('pingResult');
     if (box) { box.hidden = true; }
     showMsg('pingMsg', errMessage(err, 'つながりませんでした。'), 'err');
-  });
-}
-
-/* ---------------------------------------------------------------------------
-   管理画面 : 相手へメールを送る（窓口の Gmail から送る）
---------------------------------------------------------------------------- */
-
-/** 送る前に確認モーダルを挟む（メールは取り消せないため） */
-function onSendMail(id, msgElId) {
-  if (isBusy()) { return; }
-  if (!getAdminKey()) { guideToSettings(); return; }
-
-  var c = findContractOrLast(id);
-  if (!c) { toast('契約が見つかりません'); return; }
-  if (!c.partyEmail) {
-    toast('相手先メールアドレスが未登録です');
-    if (msgElId) { showMsg(msgElId, '相手先メールアドレスが登録されていないため送れません。', 'err'); }
-    return;
-  }
-
-  openModal({
-    title: 'この内容でメールを送ります',
-    lines: [
-      '宛先：' + c.partyEmail,
-      '契約名：' + contractTitle(c),
-      '',
-      '※確認コードはメールに書かれていません。電話やチャットで別にお伝えください。'
-    ],
-    okLabel: '送る',
-    onOk: function () { doSendMail(c, msgElId); }
-  });
-}
-
-function doSendMail(c, msgElId) {
-  callGas('sendmail', {
-    key: getAdminKey(),
-    id: c.id,
-    appUrl: appBaseUrl()          // 項目名は appUrl（signUrlBase ではない）
-  }, 'メールを送っています…').then(function (res) {
-    if (!res.ok) {
-      var e = String(res.error || 'メールを送れませんでした。');
-      toast('送れませんでした');
-      if (msgElId) { showMsg(msgElId, e, 'err'); } else { showNetBar(e); }
-      return;
-    }
-    var okText = '送信しました（送信先：' + String(res.to || c.partyEmail) + '）';
-    toast(okText);
-    if (msgElId) { showMsg(msgElId, okText, 'ok'); }
-  }).catch(function (err) {
-    var m = errMessage(err, 'つながりませんでした。ネットワークをご確認ください。');
-    toast('送れませんでした');
-    if (msgElId) { showMsg(msgElId, m, 'err'); } else { showNetBar(m); }
   });
 }
 
@@ -2580,18 +2595,25 @@ function showResult(contract) {
   if (fbUrl) { fbUrl.hidden = true; fbUrl.value = url; }
   if (fbCode) { fbCode.hidden = true; fbCode.value = contract.code; }
 
-  var mailEl = $('resultMail');
-  if (mailEl) { mailEl.value = buildMailText(contract); }   // textarea.value なので HTML は解釈されない
-  var fbMail = $('resultMailFallback');
-  if (fbMail) { fbMail.hidden = true; fbMail.value = buildMailText(contract); }
+  /* 貼り付ける文面3種類。どれも input / textarea の value なので HTML は解釈されない */
+  var subjectText = buildMailSubject(contract);
+  var bodyText    = buildMailBody(contract);
+  var chatText    = buildChatText(contract);
 
-  /* メール送信ボタン。相手先メールが無いときは押せないようにする */
-  hideMsg('sendMailMsg');
-  var sendBtn = $('btnSendMail');
-  if (sendBtn) { sendBtn.disabled = !contract.partyEmail; }
-  if (!contract.partyEmail) {
-    showMsg('sendMailMsg', '相手先メールアドレスが未登録のため、このボタンからは送れません。', 'err');
-  }
+  var subjEl = $('resultSubject');
+  if (subjEl) { subjEl.value = subjectText; }
+  var fbSubj = $('resultSubjectFallback');
+  if (fbSubj) { fbSubj.hidden = true; fbSubj.value = subjectText; }
+
+  var mailEl = $('resultMail');
+  if (mailEl) { mailEl.value = bodyText; }
+  var fbMail = $('resultMailFallback');
+  if (fbMail) { fbMail.hidden = true; fbMail.value = bodyText; }
+
+  var chatEl = $('resultChat');
+  if (chatEl) { chatEl.value = chatText; }
+  var fbChat = $('resultChatFallback');
+  if (fbChat) { fbChat.hidden = true; fbChat.value = chatText; }
 
   var rs = $('resultCard');
   if (rs) {
@@ -2697,29 +2719,38 @@ function cardHtml(c) {
     out +=     '<div class="btn-row" style="margin-top:12px;">';
     out +=       '<button class="btn btn--sm" type="button" data-action="copy-code" data-id="' + escapeHtml(c.id) + '">コードをコピー</button>';
     out +=     '</div>';
+    out +=     '<div class="notice notice--info" style="margin-top:12px;margin-bottom:0;">' +
+                 '確認コードは、契約書のリンクとは<strong>別の経路</strong>でお伝えください' +
+                 '（リンクはメールやチャット、コードは電話や口頭など）。' +
+               '</div>';
     out +=   '</div>';
 
-    out +=   '<h3 class="sec-title" style="margin-top:16px;">メール文案</h3>';
-    out +=   '<textarea class="mailtext" readonly>' + escapeHtml(buildMailText(c)) + '</textarea>';
-    out +=   '<div class="btn-row" style="margin-top:12px;">';
-    out +=     '<button class="btn btn--sm" type="button" data-action="copy-mail" data-id="' + escapeHtml(c.id) + '">メール文案をコピー</button>';
+    /* 貼り付ける文面3種類。結果カードと同じ順（件名／本文／チャット） */
+    out +=   '<h3 class="sec-title" style="margin-top:16px;">送る文面</h3>';
+    out +=   '<div class="field__hint" style="margin-bottom:12px;">' +
+               'この文面をコピーして、いつものメールやチャットから送ってください。' +
+             '</div>';
+
+    out +=   '<div class="copylabel">メールの件名</div>';
+    out +=   '<input class="copyline" type="text" readonly value="' + escapeHtml(buildMailSubject(c)) + '">';
+    out +=   '<div class="btn-row" style="margin-top:8px;">';
+    out +=     '<button class="btn btn--sm" type="button" data-action="copy-subject" data-id="' + escapeHtml(c.id) + '">件名をコピー</button>';
+    out +=   '</div>';
+
+    out +=   '<div class="copylabel" style="margin-top:16px;">メールの本文</div>';
+    out +=   '<textarea class="mailtext" readonly>' + escapeHtml(buildMailBody(c)) + '</textarea>';
+    out +=   '<div class="btn-row" style="margin-top:8px;">';
+    out +=     '<button class="btn btn--sm" type="button" data-action="copy-mail" data-id="' + escapeHtml(c.id) + '">本文をコピー</button>';
+    out +=   '</div>';
+
+    out +=   '<div class="copylabel" style="margin-top:16px;">チャット用の短い文面</div>';
+    out +=   '<textarea class="mailtext mailtext--chat" readonly>' + escapeHtml(buildChatText(c)) + '</textarea>';
+    out +=   '<div class="btn-row" style="margin-top:8px;">';
+    out +=     '<button class="btn btn--sm" type="button" data-action="copy-chat" data-id="' + escapeHtml(c.id) + '">チャット文面をコピー</button>';
     out +=   '</div>';
     out +=   '<div class="field__hint" style="margin-top:8px;">' +
-               '※確認コードは電話やチャットなど別の経路でお伝えするとより安全です。' +
+               '※チャット用の文面に確認コードは入っていません。コードは別にお伝えください。' +
              '</div>';
-
-    if (c.partyEmail) {
-      out += '<div class="btn-row" style="margin-top:16px;">';
-      out +=   '<button class="btn btn--primary btn--block" type="button" data-action="sendmail" data-id="' + escapeHtml(c.id) + '">この内容でメールを送る</button>';
-      out += '</div>';
-      out += '<div class="field__hint" style="margin-top:8px;">' +
-               '※確認コードはメールに書かれていません。電話やチャットで別にお伝えください。' +
-             '</div>';
-    } else {
-      out += '<div class="field__hint" style="margin-top:8px;">' +
-               '相手先メールアドレスが未登録のため、メールは送れません。' +
-             '</div>';
-    }
 
     out +=   '<div class="notice" style="margin-top:16px;margin-bottom:0;">' +
                'まだ締結されていません。URLと4桁コードを相手にお渡しください。' +
@@ -3705,10 +3736,15 @@ function bindEvents() {
     if (copyBtn) {
       var c1 = findContractOrLast(lastCreatedId);
       if (!c1) { toast('コピー元が見つかりません'); return; }
-      if (copyBtn.dataset.copy === 'url') {
+      var what = copyBtn.dataset.copy;
+      if (what === 'url') {
         copyText(signUrlFor(c1.id, c1.token), 'resultUrlFallback');
-      } else if (copyBtn.dataset.copy === 'mail') {
-        copyText(buildMailText(c1), 'resultMailFallback');
+      } else if (what === 'subject') {
+        copyText(buildMailSubject(c1), 'resultSubjectFallback');
+      } else if (what === 'mail') {
+        copyText(buildMailBody(c1), 'resultMailFallback');
+      } else if (what === 'chat') {
+        copyText(buildChatText(c1), 'resultChatFallback');
       } else {
         copyText(c1.code, 'resultCodeFallback');
       }
@@ -3731,12 +3767,21 @@ function bindEvents() {
         if (c2) { copyText(c2.code, null); }
         return;
       }
-      if (action === 'copy-mail') {
-        var c3 = findContractOrLast(id);
-        if (c3) { copyText(buildMailText(c3), null); }
+      if (action === 'copy-subject') {
+        var c5 = findContractOrLast(id);
+        if (c5) { copyText(buildMailSubject(c5), null); }
         return;
       }
-      if (action === 'sendmail') { onSendMail(id, null); return; }
+      if (action === 'copy-mail') {
+        var c3 = findContractOrLast(id);
+        if (c3) { copyText(buildMailBody(c3), null); }
+        return;
+      }
+      if (action === 'copy-chat') {
+        var c6 = findContractOrLast(id);
+        if (c6) { copyText(buildChatText(c6), null); }
+        return;
+      }
       if (action === 'print') { printContract(id); return; }
     }
   });
@@ -3747,14 +3792,6 @@ function bindEvents() {
 
   var btnCreate = $('btnCreate');
   if (btnCreate) { btnCreate.addEventListener('click', onCreate); }
-
-  /* 作成直後の「この内容でメールを送る」 */
-  var btnSendMail = $('btnSendMail');
-  if (btnSendMail) {
-    btnSendMail.addEventListener('click', function () {
-      onSendMail(lastCreatedId, 'sendMailMsg');
-    });
-  }
 
   /* 設定タブ */
   var btnSaveKey = $('btnSaveKey');
