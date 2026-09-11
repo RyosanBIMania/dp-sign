@@ -1,0 +1,3872 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<title>DP Sign</title>
+<!--
+  DP Sign v0.3
+  株式会社データパレード 自社用 電子契約ツール
+
+  ■ このアプリの位置づけ
+    - 単一HTMLファイル。外部ライブラリ・CDN・Webフォントは一切使わない。
+    - 契約の正本は Google Apps Script（窓口）の先にあるスプレッドシート。
+      この端末の localStorage に残すのは「合言葉」と「一覧の控え」だけ。
+    - 相手のスマホから ?doc=<契約ID>&t=<閲覧トークン> で開いて署名できる。
+
+  ■ v0.3 で足したもの（今回）
+    - 保存先を Google Apps Script の窓口（スプレッドシート）に移した
+    - 相手へのメール送信（窓口が Gmail から送る）
+    - 確認コードの回数数えをサーバー側に移した（相手のブラウザでは数えない）
+    - 通信中の表示・二重送信の防止・20秒の待ち切り
+    - 試作の名残（端末内保存の注意書き・コードの覗き見表示）を削除
+
+  ■ v0.2 で足したもの
+    - 辞退（締結を止める唯一の出口）／ステータス3状態（送信待ち・締結済み・辞退）
+    - 締結／辞退の直前に「取り消せません」の確認モーダル
+    - 締結証明書を4ブロック構成（ヘッダ／署名者イベント／契約概要イベント／注記）に
+    - 契約番号を UUID 形式に（新規作成分から）
+    - 開封日時の記録（署名画面を最初に開いた時刻）
+    - 署名は「氏名から自動生成」が既定。手書きは切り替えたときだけ
+    - 相手に送るメール文案の生成とコピー
+    - 業務委託契約書の雛形を準委任向けに改訂（報酬の形3種・貸与品・顧客情報の秘密保持）
+    - 用途は「当社が発注する側」の契約。相手は個人・小規模の業務委託先を想定。
+      大手クライアントとの基本契約には使わない。
+
+  ■ 画面の切り替え
+    - URL に ?doc= が無い                     → 管理画面（当社が使う側）
+    - URL に ?doc=<契約ID>&t=<閲覧トークン>   → 署名画面（相手が開く側）
+
+  ■ 合言葉（管理キー）について
+    - コードには絶対に書かない。管理画面の［設定］で1回入れると、その端末の
+      localStorage に残る。
+    - 署名画面（?doc= 付き）では合言葉を一切読まない・送らない。
+      スクリプトの先頭で isSignScreen を決め、true のあいだ getAdminKey() は
+      必ず空文字を返す作りにしてある。
+-->
+<style>
+/* ============================================================
+   デザイントークン
+   ============================================================ */
+:root{
+  /* 色 */
+  --c-bg:#0e1014;
+  --c-bg-2:#141821;
+  --c-bg-3:#1b2029;
+  --c-card:rgba(255,255,255,.055);
+  --c-card-hi:rgba(255,255,255,.09);
+  --c-line:rgba(255,255,255,.12);
+  --c-line-strong:rgba(255,255,255,.22);
+  --c-text:#eef0f4;
+  --c-text-2:#b9c0cc;
+  --c-muted:#7f8797;
+  --c-gold:#d8b44a;
+  --c-gold-hi:#f0d27a;
+  --c-gold-dim:rgba(216,180,74,.16);
+  --c-ok:#41c98a;
+  --c-ok-dim:rgba(65,201,138,.16);
+  --c-warn:#e8b143;
+  --c-warn-dim:rgba(232,177,67,.16);
+  --c-err:#ff7272;
+  --c-err-dim:rgba(255,114,114,.14);
+  --c-grad-gold:linear-gradient(135deg,#f0d27a 0%,#d8b44a 55%,#b9932f 100%);
+  --c-grad-bg:radial-gradient(1200px 600px at 50% -10%, #1d2430 0%, #0e1014 60%);
+
+  /* 余白 */
+  --sp-1:4px;
+  --sp-2:8px;
+  --sp-3:12px;
+  --sp-4:16px;
+  --sp-5:24px;
+  --sp-6:32px;
+  --sp-7:48px;
+
+  /* 文字 */
+  --f-base:-apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", sans-serif;
+  --f-mono:"SF Mono", "SFMono-Regular", Menlo, Consolas, "Courier New", monospace;
+  --f-serif:"Hiragino Mincho ProN", "Yu Mincho", "MS Mincho", serif;
+  --fs-xs:11px;
+  --fs-sm:13px;
+  --fs-md:15px;
+  --fs-lg:18px;
+  --fs-xl:22px;
+  --fs-2xl:28px;
+
+  /* 角丸 */
+  --r-sm:8px;
+  --r-md:14px;
+  --r-lg:20px;
+  --r-full:999px;
+
+  /* 影 */
+  --sh-1:0 1px 2px rgba(0,0,0,.3);
+  --sh-2:0 6px 20px rgba(0,0,0,.35);
+  --sh-3:0 14px 44px rgba(0,0,0,.45);
+  --sh-gold:0 6px 20px rgba(216,180,74,.28);
+
+  /* アニメーション（3段階） */
+  --anim-fast:120ms cubic-bezier(.4,0,1,1);
+  --anim-smooth:240ms cubic-bezier(.4,0,.2,1);
+  --anim-spring:420ms cubic-bezier(.22,1.2,.36,1);
+
+  /* 寸法 */
+  --tap:44px;              /* iOS HIG 準拠の最小タップ領域 */
+  --maxw:560px;
+  --header-h:56px;
+  --footer-h:62px;
+}
+
+/* ============================================================
+   リセット
+   ============================================================ */
+*,*::before,*::after{box-sizing:border-box;}
+html,body{margin:0;padding:0;}
+html{-webkit-text-size-adjust:100%;}
+body{
+  font-family:var(--f-base);
+  font-size:var(--fs-md);
+  line-height:1.7;
+  color:var(--c-text);
+  background:var(--c-bg);
+  background-image:var(--c-grad-bg);
+  background-attachment:fixed;
+  min-height:100vh;
+  -webkit-font-smoothing:antialiased;
+}
+button,input,select,textarea{font-family:inherit;font-size:inherit;color:inherit;}
+h1,h2,h3,h4,p{margin:0;}
+ul{margin:0;padding:0;list-style:none;}
+
+/* hidden 属性は何があっても効かせる（display 指定に負けさせない） */
+[hidden]{display:none !important;}
+
+/* ============================================================
+   共通パーツ
+   ============================================================ */
+.app{
+  max-width:var(--maxw);
+  margin:0 auto;
+  padding:calc(var(--header-h) + var(--sp-4)) var(--sp-4) calc(var(--footer-h) + var(--sp-7));
+  min-height:100vh;
+}
+.app[hidden]{display:none !important;}
+.app--sign{padding-bottom:var(--sp-7);}
+.app--sign[hidden]{display:none !important;}
+
+.screen{display:block;}
+.screen[hidden]{display:none !important;}
+
+/* ヘッダー */
+.hdr{
+  position:fixed;top:0;left:0;right:0;z-index:40;
+  height:var(--header-h);
+  display:flex;align-items:center;justify-content:center;gap:var(--sp-2);
+  background:rgba(14,16,20,.78);
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--c-line);
+}
+.hdr[hidden]{display:none !important;}
+.hdr__mark{
+  width:26px;height:26px;border-radius:7px;
+  background:var(--c-grad-gold);
+  box-shadow:var(--sh-gold);
+  display:flex;align-items:center;justify-content:center;
+  font-size:var(--fs-sm);font-weight:800;color:#2a2205;
+}
+.hdr__title{
+  font-size:var(--fs-lg);font-weight:700;letter-spacing:.08em;
+  background:var(--c-grad-gold);
+  -webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:var(--c-gold);
+}
+.hdr__sub{font-size:var(--fs-xs);color:var(--c-muted);letter-spacing:.06em;}
+
+/* フッタータブ */
+.ftr{
+  position:fixed;bottom:0;left:0;right:0;z-index:40;
+  display:flex;justify-content:center;gap:var(--sp-2);
+  padding:var(--sp-2) var(--sp-3) calc(var(--sp-2) + env(safe-area-inset-bottom,0px));
+  background:rgba(14,16,20,.82);
+  backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);
+  border-top:1px solid var(--c-line);
+}
+.ftr[hidden]{display:none !important;}
+.ftr__inner{display:flex;width:100%;max-width:var(--maxw);gap:var(--sp-2);}
+.tabbtn{
+  flex:1;min-height:var(--tap);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+  background:transparent;border:1px solid transparent;border-radius:var(--r-md);
+  color:var(--c-muted);font-size:var(--fs-xs);font-weight:600;letter-spacing:.05em;
+  cursor:pointer;
+  transition:background var(--anim-smooth), color var(--anim-smooth), border-color var(--anim-smooth);
+}
+.tabbtn[hidden]{display:none !important;}
+.tabbtn__ico{font-size:var(--fs-lg);line-height:1;}
+.tabbtn.is-active{color:var(--c-gold-hi);background:var(--c-gold-dim);border-color:rgba(216,180,74,.3);}
+
+/* カード（半透明＋ぼかし） */
+.card{
+  background:var(--c-card);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-md);
+  box-shadow:var(--sh-2);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  padding:var(--sp-4);
+  margin-bottom:var(--sp-4);
+}
+.card[hidden]{display:none !important;}
+.card--flat{box-shadow:none;background:rgba(255,255,255,.035);}
+
+.sec-title{
+  font-size:var(--fs-xs);font-weight:700;letter-spacing:.14em;
+  color:var(--c-gold);text-transform:uppercase;
+  margin-bottom:var(--sp-3);
+  display:flex;align-items:center;gap:var(--sp-2);
+}
+.sec-title::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--c-line-strong),transparent);}
+
+/* ボタン */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:var(--sp-2);
+  min-height:var(--tap);padding:0 var(--sp-4);
+  border-radius:var(--r-md);border:1px solid var(--c-line-strong);
+  background:rgba(255,255,255,.06);color:var(--c-text);
+  font-size:var(--fs-md);font-weight:600;cursor:pointer;
+  transition:transform var(--anim-fast), background var(--anim-smooth), opacity var(--anim-smooth), box-shadow var(--anim-smooth);
+  -webkit-tap-highlight-color:transparent;
+}
+.btn[hidden]{display:none !important;}
+.btn:active{transform:scale(.97);}
+.btn:disabled{opacity:.4;cursor:not-allowed;}
+.btn:disabled:active{transform:none;}
+.btn--primary{
+  background:var(--c-grad-gold);border-color:transparent;color:#2a2205;
+  box-shadow:var(--sh-gold);font-weight:700;
+}
+.btn--block{width:100%;}
+.btn--sm{min-height:var(--tap);padding:0 var(--sp-3);font-size:var(--fs-sm);}
+.btn--sm[hidden]{display:none !important;}
+.btn--ghost{background:transparent;}
+.btn--danger{background:var(--c-err-dim);border-color:rgba(255,114,114,.4);color:#ffbcbc;}
+.btn-row{display:flex;gap:var(--sp-2);flex-wrap:wrap;}
+.btn-row[hidden]{display:none !important;}
+
+/* フォーム */
+.field{margin-bottom:var(--sp-4);}
+.field[hidden]{display:none !important;}
+.field__label{
+  display:block;font-size:var(--fs-sm);font-weight:600;color:var(--c-text-2);
+  margin-bottom:var(--sp-2);
+}
+.field__req{color:var(--c-gold);font-size:var(--fs-xs);margin-left:var(--sp-1);}
+.field__hint{font-size:var(--fs-xs);color:var(--c-muted);margin-top:var(--sp-1);}
+.field__hint[hidden]{display:none !important;}
+.input,.textarea,.select{
+  width:100%;min-height:var(--tap);padding:var(--sp-2) var(--sp-3);
+  background:rgba(0,0,0,.3);border:1px solid var(--c-line);border-radius:var(--r-sm);
+  color:var(--c-text);
+  transition:border-color var(--anim-smooth), box-shadow var(--anim-smooth);
+}
+.input:focus,.textarea:focus,.select:focus{
+  outline:none;border-color:var(--c-gold);box-shadow:0 0 0 3px var(--c-gold-dim);
+}
+.textarea{min-height:110px;resize:vertical;line-height:1.6;}
+.select{appearance:none;-webkit-appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--c-muted) 50%),linear-gradient(135deg,var(--c-muted) 50%,transparent 50%);
+  background-position:calc(100% - 18px) 50%, calc(100% - 12px) 50%;
+  background-size:6px 6px,6px 6px;background-repeat:no-repeat;
+  padding-right:var(--sp-6);
+}
+.field-row{display:flex;gap:var(--sp-3);}
+.field-row > *{flex:1;min-width:0;}
+
+/* チップ選択（契約の種類） */
+.chips{display:flex;flex-direction:column;gap:var(--sp-2);}
+.chip{
+  display:flex;align-items:center;gap:var(--sp-3);
+  min-height:var(--tap);padding:var(--sp-3);
+  border:1px solid var(--c-line);border-radius:var(--r-md);
+  background:rgba(255,255,255,.03);cursor:pointer;
+  transition:border-color var(--anim-smooth), background var(--anim-smooth), transform var(--anim-fast);
+}
+.chip[hidden]{display:none !important;}
+.chip:active{transform:scale(.99);}
+.chip.is-active{border-color:var(--c-gold);background:var(--c-gold-dim);}
+.chip__radio{
+  width:20px;height:20px;border-radius:50%;flex:0 0 auto;
+  border:2px solid var(--c-line-strong);
+  display:flex;align-items:center;justify-content:center;
+  transition:border-color var(--anim-smooth);
+}
+.chip.is-active .chip__radio{border-color:var(--c-gold);}
+.chip.is-active .chip__radio::after{content:"";width:10px;height:10px;border-radius:50%;background:var(--c-grad-gold);}
+.chip__body{min-width:0;}
+.chip__name{font-size:var(--fs-md);font-weight:600;}
+.chip__desc{font-size:var(--fs-xs);color:var(--c-muted);}
+
+/* 注意書き */
+.notice{
+  border-left:3px solid var(--c-warn);
+  background:var(--c-warn-dim);
+  border-radius:var(--r-sm);
+  padding:var(--sp-3);
+  font-size:var(--fs-sm);color:#f5dfae;
+  margin-bottom:var(--sp-4);
+}
+.notice[hidden]{display:none !important;}
+.notice--info{border-left-color:var(--c-gold);background:var(--c-gold-dim);color:#eedfae;}
+
+/* 契約書本文 */
+.doc{
+  background:rgba(0,0,0,.28);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-sm);
+  padding:var(--sp-4);
+  font-family:var(--f-serif);
+  font-size:var(--fs-sm);
+  line-height:1.9;
+  white-space:pre-wrap;
+  word-break:break-word;
+  max-height:46vh;
+  overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+}
+.doc[hidden]{display:none !important;}
+.doc--tall{max-height:56vh;}
+
+/* 結果（URL・コード） */
+.result[hidden]{display:none !important;}
+.bigfield{
+  background:rgba(0,0,0,.35);
+  border:1px solid var(--c-gold);
+  border-radius:var(--r-md);
+  padding:var(--sp-3);
+  margin-bottom:var(--sp-3);
+}
+.bigfield[hidden]{display:none !important;}
+.bigfield__label{font-size:var(--fs-xs);color:var(--c-gold);font-weight:700;letter-spacing:.1em;margin-bottom:var(--sp-2);}
+.bigfield__val{
+  font-family:var(--f-mono);font-size:var(--fs-sm);
+  word-break:break-all;color:var(--c-text);
+  background:transparent;border:0;padding:0;width:100%;
+}
+.bigfield__code{
+  font-family:var(--f-mono);font-size:var(--fs-2xl);font-weight:800;
+  letter-spacing:.5em;text-indent:.5em;color:var(--c-gold-hi);
+}
+.fallback-input{
+  width:100%;min-height:var(--tap);margin-top:var(--sp-2);
+  font-family:var(--f-mono);font-size:var(--fs-sm);
+  background:rgba(0,0,0,.5);border:1px dashed var(--c-gold);border-radius:var(--r-sm);
+  color:var(--c-gold-hi);padding:var(--sp-2);
+}
+.fallback-input[hidden]{display:none !important;}
+
+/* 一覧 */
+.filters{display:flex;gap:var(--sp-2);margin-bottom:var(--sp-4);}
+.filterbtn{
+  flex:1;min-height:var(--tap);
+  border-radius:var(--r-full);border:1px solid var(--c-line);
+  background:rgba(255,255,255,.04);color:var(--c-text-2);
+  font-size:var(--fs-sm);font-weight:600;cursor:pointer;
+  transition:background var(--anim-smooth), color var(--anim-smooth), border-color var(--anim-smooth);
+}
+.filterbtn[hidden]{display:none !important;}
+.filterbtn.is-active{background:var(--c-gold-dim);border-color:var(--c-gold);color:var(--c-gold-hi);}
+
+.clcard{
+  background:var(--c-card);
+  border:1px solid var(--c-line);
+  border-radius:var(--r-md);
+  box-shadow:var(--sh-1);
+  backdrop-filter:blur(12px);
+  -webkit-backdrop-filter:blur(12px);
+  margin-bottom:var(--sp-3);
+  overflow:hidden;
+  transition:border-color var(--anim-smooth);
+}
+.clcard[hidden]{display:none !important;}
+.clcard.is-open{border-color:var(--c-line-strong);}
+.clcard__head{
+  width:100%;min-height:var(--tap);
+  display:flex;align-items:center;gap:var(--sp-3);
+  padding:var(--sp-3) var(--sp-4);
+  background:transparent;border:0;text-align:left;cursor:pointer;color:inherit;
+}
+.clcard__main{flex:1;min-width:0;}
+.clcard__name{font-size:var(--fs-md);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.clcard__meta{font-size:var(--fs-xs);color:var(--c-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.clcard__right{display:flex;flex-direction:column;align-items:flex-end;gap:var(--sp-1);flex:0 0 auto;}
+.clcard__caret{
+  color:var(--c-muted);font-size:var(--fs-sm);
+  transition:transform var(--anim-spring);
+}
+.clcard.is-open .clcard__caret{transform:rotate(180deg);}
+.clcard__body{
+  padding:0 var(--sp-4) var(--sp-4);
+  border-top:1px solid var(--c-line);
+  padding-top:var(--sp-4);
+}
+.clcard__body[hidden]{display:none !important;}
+
+.badge{
+  display:inline-flex;align-items:center;
+  padding:2px var(--sp-2);border-radius:var(--r-full);
+  font-size:var(--fs-xs);font-weight:700;letter-spacing:.04em;white-space:nowrap;
+}
+.badge[hidden]{display:none !important;}
+.badge--pending{background:var(--c-warn-dim);color:var(--c-warn);border:1px solid rgba(232,177,67,.35);}
+.badge--signed{background:var(--c-ok-dim);color:var(--c-ok);border:1px solid rgba(65,201,138,.35);}
+.badge--declined{background:var(--c-err-dim);color:#ffbcbc;border:1px solid rgba(255,114,114,.4);}
+
+.empty{
+  text-align:center;padding:var(--sp-7) var(--sp-4);
+  color:var(--c-muted);font-size:var(--fs-sm);
+}
+.empty[hidden]{display:none !important;}
+.empty__ico{font-size:40px;opacity:.5;display:block;margin-bottom:var(--sp-3);}
+
+/* 定義リスト（締結記録） */
+.dl{display:grid;grid-template-columns:1fr;gap:var(--sp-2);margin:0;}
+.dl[hidden]{display:none !important;}
+.dl__row{
+  display:grid;grid-template-columns:112px 1fr;gap:var(--sp-2);
+  padding-bottom:var(--sp-2);border-bottom:1px solid rgba(255,255,255,.07);
+}
+.dl__k{font-size:var(--fs-xs);color:var(--c-muted);font-weight:600;padding-top:2px;}
+.dl__v{font-size:var(--fs-sm);word-break:break-all;}
+.dl__v--mono{font-family:var(--f-mono);font-size:var(--fs-xs);line-height:1.6;}
+.dl__v--pending{color:var(--c-muted);font-style:italic;}
+
+.sigthumb{
+  background:#fff;border-radius:var(--r-sm);padding:var(--sp-2);
+  max-width:220px;
+}
+.sigthumb[hidden]{display:none !important;}
+.sigthumb img{display:block;width:100%;height:auto;}
+
+/* 締結証明書（画面表示用の4ブロック） */
+.cert{display:block;}
+.cert[hidden]{display:none !important;}
+.cert__block{margin-bottom:var(--sp-5);}
+.cert__block[hidden]{display:none !important;}
+.cert__h{
+  font-size:var(--fs-xs);font-weight:700;letter-spacing:.12em;color:var(--c-gold);
+  border-bottom:1px solid var(--c-line);padding-bottom:var(--sp-1);margin-bottom:var(--sp-3);
+}
+.cert__note{
+  font-size:var(--fs-xs);color:var(--c-text-2);line-height:1.9;
+  border-left:3px solid var(--c-line-strong);padding-left:var(--sp-3);
+}
+.cert__note[hidden]{display:none !important;}
+.cert__note strong{color:var(--c-warn);}
+.evt{width:100%;border-collapse:collapse;font-size:var(--fs-xs);}
+.evt[hidden]{display:none !important;}
+.evt th,.evt td{border:1px solid var(--c-line);padding:var(--sp-2);text-align:left;vertical-align:top;}
+.evt th{background:rgba(255,255,255,.05);color:var(--c-text-2);font-weight:700;white-space:nowrap;}
+
+/* 取り消せません警告 */
+.warnbox{
+  border:1px solid rgba(255,114,114,.45);
+  background:var(--c-err-dim);
+  border-radius:var(--r-sm);
+  padding:var(--sp-3);
+  font-size:var(--fs-sm);line-height:1.8;color:#ffd6d6;
+  margin-bottom:var(--sp-3);
+}
+.warnbox[hidden]{display:none !important;}
+.warnbox__t{font-weight:700;display:block;margin-bottom:var(--sp-1);}
+
+/* メール文案 */
+.mailtext{
+  width:100%;min-height:300px;
+  font-family:var(--f-mono);font-size:var(--fs-xs);line-height:1.75;
+  background:rgba(0,0,0,.35);border:1px solid var(--c-line);border-radius:var(--r-sm);
+  color:var(--c-text);padding:var(--sp-3);resize:vertical;
+}
+.mailtext[hidden]{display:none !important;}
+
+/* モーダル（確認ダイアログ。window.confirm は使わない） */
+.modal{
+  position:fixed;top:0;left:0;right:0;bottom:0;z-index:90;
+  display:flex;align-items:center;justify-content:center;
+  padding:var(--sp-4);
+  background:rgba(0,0,0,.64);
+  backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);
+  animation:fadeIn var(--anim-smooth) both;
+}
+.modal[hidden]{display:none !important;}
+.modal__box{
+  width:100%;max-width:420px;max-height:86vh;overflow-y:auto;
+  -webkit-overflow-scrolling:touch;
+  background:var(--c-bg-2);
+  border:1px solid var(--c-line-strong);
+  border-radius:var(--r-lg);
+  box-shadow:var(--sh-3);
+  padding:var(--sp-5) var(--sp-4) var(--sp-4);
+  animation:fadeUp var(--anim-spring) both;
+}
+.modal__title{font-size:var(--fs-lg);font-weight:700;margin-bottom:var(--sp-3);}
+.modal__body{font-size:var(--fs-sm);color:var(--c-text-2);line-height:1.85;}
+.modal__body[hidden]{display:none !important;}
+.modal__line{margin-bottom:var(--sp-1);}
+.modal__foot{display:flex;gap:var(--sp-2);margin-top:var(--sp-5);}
+.modal__foot .btn{flex:1;}
+@keyframes fadeIn{from{opacity:0;}to{opacity:1;}}
+
+/* タブパネル */
+.tabpanel{animation:fadeUp var(--anim-spring) both;}
+.tabpanel[hidden]{display:none !important;}
+@keyframes fadeUp{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:none;}}
+
+/* ============================================================
+   署名画面
+   ============================================================ */
+.sg-head{
+  text-align:center;padding:var(--sp-6) 0 var(--sp-5);
+}
+.sg-head__mark{
+  width:46px;height:46px;border-radius:13px;margin:0 auto var(--sp-3);
+  background:var(--c-grad-gold);box-shadow:var(--sh-gold);
+  display:flex;align-items:center;justify-content:center;
+  font-size:var(--fs-lg);font-weight:800;color:#2a2205;
+}
+.sg-head__title{font-size:var(--fs-xl);font-weight:700;}
+.sg-head__sub{font-size:var(--fs-sm);color:var(--c-muted);margin-top:var(--sp-1);}
+
+.step{margin-bottom:var(--sp-4);}
+.step[hidden]{display:none !important;}
+.step__num{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:22px;height:22px;border-radius:50%;
+  background:var(--c-gold-dim);border:1px solid var(--c-gold);
+  color:var(--c-gold-hi);font-size:var(--fs-xs);font-weight:800;
+  margin-right:var(--sp-2);flex:0 0 auto;
+}
+.step__title{display:flex;align-items:center;font-size:var(--fs-md);font-weight:700;margin-bottom:var(--sp-3);}
+
+.codebox{display:flex;gap:var(--sp-2);align-items:stretch;}
+.codeinput{
+  flex:1;min-height:var(--tap);
+  font-family:var(--f-mono);font-size:var(--fs-xl);font-weight:800;
+  letter-spacing:.4em;text-indent:.4em;text-align:center;
+  background:rgba(0,0,0,.35);border:1px solid var(--c-line);border-radius:var(--r-sm);
+  color:var(--c-gold-hi);
+  transition:border-color var(--anim-smooth), box-shadow var(--anim-smooth);
+}
+.codeinput:focus{outline:none;border-color:var(--c-gold);box-shadow:0 0 0 3px var(--c-gold-dim);}
+.codeinput:disabled{opacity:.45;}
+
+.msg{font-size:var(--fs-sm);margin-top:var(--sp-2);}
+.msg[hidden]{display:none !important;}
+.msg--err{color:var(--c-err);}
+.msg--err[hidden]{display:none !important;}
+.msg--ok{color:var(--c-ok);}
+.msg--ok[hidden]{display:none !important;}
+
+/* 手書きサイン */
+.sigwrap{
+  position:relative;
+  background:#fbfbf7;border:1px solid var(--c-line-strong);border-radius:var(--r-sm);
+  overflow:hidden;
+}
+.sigwrap[hidden]{display:none !important;}
+.sigcanvas{
+  display:block;width:100%;height:180px;
+  touch-action:none;cursor:crosshair;
+}
+.sigwrap__guide{
+  position:absolute;left:var(--sp-4);right:var(--sp-4);bottom:38px;
+  border-bottom:1px dashed #c9c6b8;pointer-events:none;
+}
+.sigwrap__ph{
+  position:absolute;left:0;right:0;bottom:12px;text-align:center;
+  font-size:var(--fs-xs);color:#a8a597;pointer-events:none;
+}
+.sigwrap__ph[hidden]{display:none !important;}
+
+.checkline{
+  display:flex;align-items:flex-start;gap:var(--sp-3);
+  min-height:var(--tap);padding:var(--sp-3);
+  border:1px solid var(--c-line);border-radius:var(--r-md);
+  background:rgba(255,255,255,.03);cursor:pointer;
+  transition:border-color var(--anim-smooth), background var(--anim-smooth);
+}
+.checkline[hidden]{display:none !important;}
+.checkline.is-on{border-color:var(--c-gold);background:var(--c-gold-dim);}
+.checkline input{
+  width:22px;height:22px;flex:0 0 auto;margin-top:2px;accent-color:#d8b44a;
+}
+.checkline__txt{font-size:var(--fs-sm);line-height:1.6;}
+
+.done{
+  text-align:center;padding:var(--sp-6) var(--sp-4) var(--sp-4);
+  animation:fadeUp var(--anim-spring) both;
+}
+.done[hidden]{display:none !important;}
+.done__ico{
+  width:64px;height:64px;border-radius:50%;margin:0 auto var(--sp-4);
+  background:var(--c-ok-dim);border:2px solid var(--c-ok);
+  display:flex;align-items:center;justify-content:center;
+  font-size:30px;color:var(--c-ok);
+}
+.done__ico--decline{background:var(--c-err-dim);border-color:var(--c-err);color:var(--c-err);}
+.done__title{font-size:var(--fs-xl);font-weight:700;}
+.done__sub{font-size:var(--fs-sm);color:var(--c-text-2);margin-top:var(--sp-2);}
+
+/* トースト */
+.toast{
+  position:fixed;left:50%;bottom:calc(var(--footer-h) + var(--sp-4));
+  transform:translate(-50%,20px);
+  z-index:80;
+  max-width:calc(100vw - var(--sp-6));
+  padding:var(--sp-3) var(--sp-4);
+  background:rgba(28,33,42,.96);
+  border:1px solid var(--c-gold);
+  border-radius:var(--r-full);
+  box-shadow:var(--sh-3);
+  font-size:var(--fs-sm);font-weight:600;color:var(--c-gold-hi);
+  opacity:0;pointer-events:none;
+  transition:opacity var(--anim-smooth), transform var(--anim-spring);
+  white-space:nowrap;
+}
+.toast[hidden]{display:none !important;}
+.toast.is-show{opacity:1;transform:translate(-50%,0);}
+
+/* 通信中の覆い（「送信しています…」）。画面全体を覆うのでボタンを押せなくなる */
+.busy{
+  position:fixed;top:0;left:0;right:0;bottom:0;z-index:100;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(10,12,16,.62);
+  backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);
+}
+.busy[hidden]{display:none !important;}
+.busy__box{
+  display:flex;align-items:center;gap:var(--sp-3);
+  padding:var(--sp-4) var(--sp-5);
+  background:rgba(28,33,42,.98);
+  border:1px solid var(--c-gold);
+  border-radius:var(--r-md);
+  box-shadow:var(--sh-3);
+}
+.busy__box[hidden]{display:none !important;}
+.busy__spin{
+  width:20px;height:20px;flex:0 0 auto;
+  border:2px solid var(--c-line-strong);
+  border-top-color:var(--c-gold);
+  border-radius:50%;
+  animation:spin .8s linear infinite;
+}
+.busy__spin[hidden]{display:none !important;}
+.busy__txt{font-size:var(--fs-sm);font-weight:600;color:var(--c-gold-hi);}
+.busy__txt[hidden]{display:none !important;}
+@keyframes spin{to{transform:rotate(360deg);}}
+
+/* つながらなかったときの赤い帯（管理画面の先頭に出す） */
+.netbar{
+  margin-bottom:var(--sp-4);
+  padding:var(--sp-3) var(--sp-4);
+  background:var(--c-err-dim);
+  border:1px solid var(--c-err);
+  border-radius:var(--r-md);
+  color:#ffd4d4;
+  font-size:var(--fs-sm);line-height:1.7;
+  white-space:pre-wrap;
+}
+.netbar[hidden]{display:none !important;}
+
+/* 設定タブの補足文 */
+.setnote{font-size:var(--fs-xs);color:var(--c-muted);line-height:1.8;margin-top:var(--sp-2);}
+.setnote[hidden]{display:none !important;}
+
+/* 印刷用エリアは画面には出さない */
+.printarea{display:none;}
+.printarea[hidden]{display:none !important;}
+
+/* ============================================================
+   印刷（PDF保存）
+   ------------------------------------------------------------
+   画面用の要素は全部隠し、#printArea だけを出す。
+   1ページ目〜: 契約書本文 / 最終ページ: 電子契約締結証明書
+   ============================================================ */
+@media print{
+  @page{size:A4;margin:18mm 16mm;}
+  html,body{
+    background:#fff !important;
+    color:#000 !important;
+    font-size:10.5pt;
+    line-height:1.8;
+  }
+  body > *{display:none !important;}
+  body > .printarea{display:block !important;}
+  .printarea{
+    max-width:none;margin:0;padding:0;
+    background:#fff;color:#000;
+  }
+  .pr-doc{
+    font-family:var(--f-serif);
+    white-space:pre-wrap;
+    word-break:break-word;
+    color:#000;
+  }
+  .pr-cert{
+    page-break-before:always;
+    break-before:page;
+    font-family:var(--f-base);
+    color:#000;
+  }
+  .pr-cert__title{
+    text-align:center;
+    font-size:15pt;
+    font-weight:700;
+    letter-spacing:.2em;
+    padding-bottom:6pt;
+    border-bottom:2px solid #000;
+    margin-bottom:14pt;
+  }
+  .pr-cert__lead{font-size:9.5pt;margin-bottom:12pt;}
+  .pr-tbl{width:100%;border-collapse:collapse;font-size:9.5pt;}
+  .pr-tbl th,.pr-tbl td{
+    border:1px solid #555;
+    padding:5pt 7pt;
+    text-align:left;
+    vertical-align:top;
+    word-break:break-all;
+  }
+  .pr-tbl th{width:30%;background:#eee;font-weight:600;white-space:nowrap;}
+  .pr-mono{font-family:var(--f-mono);font-size:8.5pt;}
+  .pr-pending{color:#888;font-style:italic;}
+  .pr-sig{margin-top:12pt;}
+  .pr-sig img{max-width:70mm;height:auto;border:1px solid #999;}
+  .pr-foot{margin-top:16pt;font-size:8.5pt;color:#444;border-top:1px solid #999;padding-top:6pt;}
+  .pr-sec{
+    font-size:11pt;font-weight:700;letter-spacing:.06em;
+    margin:14pt 0 6pt;padding-bottom:3pt;border-bottom:1px solid #000;
+  }
+  .pr-evt{width:100%;border-collapse:collapse;font-size:9.5pt;}
+  .pr-evt th,.pr-evt td{border:1px solid #555;padding:5pt 7pt;text-align:left;vertical-align:top;}
+  .pr-evt th{background:#eee;font-weight:600;white-space:nowrap;}
+  .pr-note{
+    margin-top:14pt;font-size:9pt;line-height:1.8;color:#000;
+    border:1px solid #555;padding:7pt 9pt;
+  }
+  .pr-note strong{font-weight:700;}
+}
+</style>
+</head>
+<body>
+
+<!-- ============================================================
+     A. 管理画面（当社が使う側）
+     ============================================================ -->
+<header class="hdr" id="adminHeader" hidden>
+  <div class="hdr__mark">DP</div>
+  <div>
+    <div class="hdr__title">DP Sign</div>
+  </div>
+  <div class="hdr__sub">v0.3</div>
+</header>
+
+<main class="app screen" id="adminScreen" hidden>
+
+  <!-- つながらなかったときの赤い帯。中身は JS が textContent で入れる -->
+  <div class="netbar" id="netBar" hidden></div>
+
+  <!-- ---------- 作成タブ ---------- -->
+  <section class="tabpanel" id="panelCreate" hidden>
+
+    <div class="card">
+      <h2 class="sec-title">契約の種類</h2>
+      <div class="chips" id="typeChips">
+        <div class="chip" data-type="gyomu" role="button" tabindex="0">
+          <span class="chip__radio"></span>
+          <span class="chip__body">
+            <span class="chip__name">業務委託契約書</span>
+            <span class="chip__desc">継続的に業務をお願いするとき</span>
+          </span>
+        </div>
+        <div class="chip" data-type="nda" role="button" tabindex="0">
+          <span class="chip__radio"></span>
+          <span class="chip__body">
+            <span class="chip__name">秘密保持契約書（NDA）</span>
+            <span class="chip__desc">話を始める前に取り交わすもの（金額なし）</span>
+          </span>
+        </div>
+        <div class="chip" data-type="ukesho" role="button" tabindex="0">
+          <span class="chip__radio"></span>
+          <span class="chip__body">
+            <span class="chip__name">注文請書</span>
+            <span class="chip__desc">1件ごとの発注を受けてもらうとき</span>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="sec-title">相手先と内容</h2>
+
+      <div class="field">
+        <label class="field__label" for="fPartyName">相手先名<span class="field__req">必須</span></label>
+        <input class="input" type="text" id="fPartyName" placeholder="例）株式会社サンプル商事" autocomplete="off">
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="fPartyEmail">相手先メールアドレス</label>
+        <input class="input" type="email" id="fPartyEmail" placeholder="例）sample@example.com" autocomplete="off">
+        <div class="field__hint">この住所に契約書のご案内メールを送ります（送信は当社の窓口が行います）。</div>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="fTitle">契約名<span class="field__req">必須</span></label>
+        <input class="input" type="text" id="fTitle" placeholder="例）業務委託契約書_株式会社サンプル商事" autocomplete="off">
+        <div class="field__hint">相手に届くメールと証明書に出る名前です。既定は「種類_相手先名」。手で変えられます。</div>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="fWork">業務内容<span class="field__req">必須</span></label>
+        <textarea class="textarea" id="fWork" placeholder="例）月次レポートの作成補助&#10;例）取材記事の執筆（月2本）"></textarea>
+      </div>
+
+      <div class="field" id="fieldFeeType">
+        <label class="field__label" for="fFeeType">報酬の形</label>
+        <select class="select" id="fFeeType">
+          <option value="lump">一括（総額）</option>
+          <option value="monthly">月額</option>
+          <option value="daily">人日単価</option>
+        </select>
+        <div class="field__hint">業務委託契約書のときだけ選べます。選んだ形に合わせて第3条・第4条の文面が変わります。</div>
+      </div>
+
+      <div class="field" id="fieldAmount">
+        <label class="field__label" for="fAmount"><span id="amountLabelText">金額（円・税抜）</span><span class="field__req">必須</span></label>
+        <input class="input" type="number" id="fAmount" inputmode="numeric" min="0" step="1" placeholder="例）100000">
+      </div>
+
+      <div class="field">
+        <label class="field__label">契約期間</label>
+        <div class="field-row">
+          <input class="input" type="date" id="fStart" aria-label="開始日">
+          <input class="input" type="date" id="fEnd" aria-label="終了日">
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="fDeadline">手続きの完了期限</label>
+        <input class="input" type="date" id="fDeadline">
+        <div class="field__hint">既定は作成日の14日後です。メール文案に入ります。</div>
+      </div>
+
+      <div class="field">
+        <label class="field__label" for="fNote">備考</label>
+        <textarea class="textarea" id="fNote" placeholder="例）成果物の提出先は担当者へ直接"></textarea>
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn--block" type="button" id="btnPreview">本文をプレビュー</button>
+      </div>
+    </div>
+
+    <div class="card" id="previewCard" hidden>
+      <h2 class="sec-title">本文プレビュー</h2>
+      <div class="doc" id="previewDoc"></div>
+      <div class="btn-row" style="margin-top:var(--sp-4);">
+        <button class="btn btn--primary btn--block" type="button" id="btnCreate">契約を作成する</button>
+      </div>
+    </div>
+
+    <div class="card result" id="resultCard" hidden>
+      <h2 class="sec-title">相手に渡すもの</h2>
+
+      <div class="bigfield">
+        <div class="bigfield__label">署名用URL</div>
+        <div class="bigfield__val" id="resultUrl"></div>
+        <input class="fallback-input" type="text" id="resultUrlFallback" readonly hidden>
+        <div class="btn-row" style="margin-top:var(--sp-3);">
+          <button class="btn btn--sm" type="button" data-copy="url">URLをコピー</button>
+        </div>
+      </div>
+
+      <div class="bigfield">
+        <div class="bigfield__label">本人確認用 4桁コード</div>
+        <div class="bigfield__code" id="resultCode"></div>
+        <input class="fallback-input" type="text" id="resultCodeFallback" readonly hidden>
+        <div class="btn-row" style="margin-top:var(--sp-3);">
+          <button class="btn btn--sm" type="button" data-copy="code">コードをコピー</button>
+        </div>
+      </div>
+
+      <div class="notice notice--info">
+        URLと4桁コードは<strong>別々の経路</strong>で渡してください（URLはメール、コードは電話やSMSなど）。
+        同じ経路で送ると本人確認の意味が薄れます。
+      </div>
+
+      <h2 class="sec-title" style="margin-top:var(--sp-5);">メール文案</h2>
+      <textarea class="mailtext" id="resultMail" readonly></textarea>
+      <input class="fallback-input" type="text" id="resultMailFallback" readonly hidden>
+      <div class="btn-row" style="margin-top:var(--sp-3);">
+        <button class="btn btn--sm" type="button" data-copy="mail">メール文案をコピー</button>
+      </div>
+      <div class="field__hint" style="margin-top:var(--sp-2);">
+        ※確認コードは電話やチャットなど別の経路でお伝えするとより安全です。
+      </div>
+
+      <div class="btn-row" style="margin-top:var(--sp-4);">
+        <button class="btn btn--primary btn--block" type="button" id="btnSendMail">この内容でメールを送る</button>
+      </div>
+      <div class="field__hint" style="margin-top:var(--sp-2);">
+        ※確認コードはメールに書かれていません。電話やチャットで別にお伝えください。
+      </div>
+      <div class="msg" id="sendMailMsg" hidden></div>
+    </div>
+
+  </section>
+
+  <!-- ---------- 一覧タブ ---------- -->
+  <section class="tabpanel" id="panelList" hidden>
+    <div class="filters" id="listFilters">
+      <button class="filterbtn" type="button" data-filter="all">すべて</button>
+      <button class="filterbtn" type="button" data-filter="pending">送信待ち</button>
+      <button class="filterbtn" type="button" data-filter="signed">締結済み</button>
+      <button class="filterbtn" type="button" data-filter="declined">辞退</button>
+    </div>
+    <div id="listBody"></div>
+  </section>
+
+  <!-- ---------- 設定タブ ---------- -->
+  <section class="tabpanel" id="panelSettings" hidden>
+
+    <div class="card">
+      <h2 class="sec-title">合言葉（管理キー）</h2>
+      <div class="field">
+        <label class="field__label" for="setKeyInput">合言葉</label>
+        <input class="input" type="password" id="setKeyInput" autocomplete="off" placeholder="窓口に設定した合言葉">
+      </div>
+      <div class="btn-row">
+        <button class="btn btn--primary" type="button" id="btnSaveKey">保存する</button>
+        <button class="btn" type="button" id="btnClearKey">この端末から消す</button>
+      </div>
+      <div class="msg" id="setKeyMsg" hidden></div>
+      <div class="setnote">
+        契約の作成・一覧の読み込み・メール送信に使います。<br>
+        この合言葉は<strong>この端末のブラウザにだけ</strong>保存され、相手が開く署名画面では一切読み込みません。<br>
+        端末を替えたときは、その端末で1回だけ入れ直してください。
+      </div>
+    </div>
+
+    <div class="card">
+      <h2 class="sec-title">窓口の状態</h2>
+      <div class="btn-row">
+        <button class="btn btn--block" type="button" id="btnPing">つながるか確かめる</button>
+      </div>
+      <div id="pingResult" hidden></div>
+      <div class="msg" id="pingMsg" hidden></div>
+      <div class="setnote">
+        契約の正本（本物の台帳）は Google スプレッドシートにあります。この画面の一覧は、そこから読み直したものです。
+      </div>
+    </div>
+
+  </section>
+
+</main>
+
+<nav class="ftr" id="adminFooter" hidden>
+  <div class="ftr__inner" id="tabBar">
+    <button class="tabbtn" type="button" data-tab="create">
+      <span class="tabbtn__ico">✎</span><span>作成</span>
+    </button>
+    <button class="tabbtn" type="button" data-tab="list">
+      <span class="tabbtn__ico">☰</span><span>一覧</span>
+    </button>
+    <button class="tabbtn" type="button" data-tab="settings">
+      <span class="tabbtn__ico">⚙</span><span>設定</span>
+    </button>
+  </div>
+</nav>
+
+<!-- ============================================================
+     B. 署名画面（相手が開く側）  URL に ?doc=<契約ID> があるとき
+     ============================================================ -->
+<main class="app app--sign screen" id="signScreen" hidden>
+
+  <div class="sg-head">
+    <div class="sg-head__mark">DP</div>
+    <div class="sg-head__title">契約書のご確認とご署名</div>
+    <div class="sg-head__sub">株式会社データパレード</div>
+  </div>
+
+  <!-- 開けなかったとき（理由は窓口からの文言をそのまま出す） -->
+  <div class="card" id="signNotFound" hidden>
+    <div class="empty">
+      <span class="empty__ico">⚠</span>
+      <strong>契約書を開けませんでした</strong>
+      <p style="margin-top:var(--sp-2);" id="signNotFoundMsg"></p>
+      <p style="margin-top:var(--sp-2);">
+        お手数ですが、お送りしたURLをもう一度ご確認のうえ、送信元へご連絡ください。
+      </p>
+    </div>
+  </div>
+
+  <!-- 署名フロー -->
+  <div id="signFlow" hidden>
+
+    <!-- 1. 本文 -->
+    <section class="card step">
+      <h2 class="step__title"><span class="step__num">1</span>契約書の内容</h2>
+      <div class="doc doc--tall" id="signDoc"></div>
+    </section>
+
+    <!-- 2. 本人確認コード -->
+    <section class="card step" id="stepCode">
+      <h2 class="step__title"><span class="step__num">2</span>4桁の確認コード</h2>
+      <p class="field__hint" style="margin-bottom:var(--sp-3);">
+        当社からお伝えした4桁の数字を入力してください。
+      </p>
+      <div class="codebox">
+        <input class="codeinput" type="text" id="codeInput" inputmode="numeric" pattern="[0-9]*"
+               maxlength="4" placeholder="0000" autocomplete="off">
+        <button class="btn btn--primary" type="button" id="btnVerifyCode">確認</button>
+      </div>
+      <div class="msg msg--err" id="codeMsg" hidden></div>
+
+      <!-- 「あと◯回」はサーバー（窓口）が返す attemptsLeft をそのまま出す -->
+      <div class="field__hint" id="codeLeft" hidden></div>
+    </section>
+
+    <!-- 3〜6. 署名 -->
+    <section class="step" id="stepSign" hidden>
+
+      <div class="card">
+        <h2 class="step__title"><span class="step__num">3</span>お名前（署名者名）</h2>
+        <div class="field" style="margin-bottom:0;">
+          <input class="input" type="text" id="signerName" placeholder="例）山田太郎" autocomplete="name">
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="step__title"><span class="step__num">4</span>ご署名</h2>
+        <p class="field__hint" id="sigModeHint" style="margin-bottom:var(--sp-3);">
+          お名前から署名を自動で作ります。手書きにしたい場合は下のボタンで切り替えてください。
+        </p>
+        <div class="sigwrap">
+          <canvas class="sigcanvas" id="sigCanvas"></canvas>
+          <div class="sigwrap__guide"></div>
+          <div class="sigwrap__ph" id="sigPlaceholder" hidden>この枠の中に指またはマウスでご署名ください</div>
+        </div>
+        <div class="btn-row" style="margin-top:var(--sp-3);">
+          <button class="btn btn--sm" type="button" id="btnSigMode">手書きで書く</button>
+          <button class="btn btn--sm" type="button" id="btnClearSig" hidden>書き直す</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 class="step__title"><span class="step__num">5</span>ご同意</h2>
+        <label class="checkline" id="agreeLine">
+          <input type="checkbox" id="agreeCheck">
+          <span class="checkline__txt">上記の内容に同意します</span>
+        </label>
+
+        <div class="warnbox" style="margin-top:var(--sp-4);">
+          <span class="warnbox__t">操作の前にご確認ください</span>
+          締結（署名）および辞退の操作は取り消せません。<br>
+          辞退した場合、この契約は締結されずに終了します。
+        </div>
+
+        <div class="btn-row">
+          <button class="btn btn--primary btn--block" type="button" id="btnSign" disabled>同意して締結する</button>
+        </div>
+        <div class="btn-row" style="margin-top:var(--sp-2);">
+          <button class="btn btn--danger btn--block" type="button" id="btnDecline">辞退</button>
+        </div>
+        <div class="msg msg--err" id="signMsg" hidden></div>
+      </div>
+
+    </section>
+  </div>
+
+  <!-- 締結完了 -->
+  <div id="signDone" hidden>
+    <div class="done">
+      <div class="done__ico">✓</div>
+      <div class="done__title">締結が完了しました</div>
+      <div class="done__sub">ご協力ありがとうございました。<br>下記が締結の記録です。印刷して保管できます。</div>
+    </div>
+    <div class="card">
+      <h2 class="sec-title">電子契約 締結証明書</h2>
+      <div id="signRecord"></div>
+      <div class="btn-row" style="margin-top:var(--sp-4);">
+        <button class="btn btn--primary btn--block" type="button" id="btnPrintSigned">契約書を印刷 / PDF保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 辞退済み -->
+  <div id="signDeclined" hidden>
+    <div class="done">
+      <div class="done__ico done__ico--decline">—</div>
+      <div class="done__title">辞退を受け付けました</div>
+      <div class="done__sub">この契約は締結されずに終了しました。<br>同じ契約を締結することはできません。</div>
+    </div>
+    <div class="card">
+      <h2 class="sec-title">電子契約 締結証明書（辞退）</h2>
+      <div id="declineRecord"></div>
+      <div class="btn-row" style="margin-top:var(--sp-4);">
+        <button class="btn btn--block" type="button" id="btnPrintDeclined">記録を印刷 / PDF保存</button>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- 確認モーダル（window.confirm は使わない） -->
+<div class="modal" id="modal" hidden>
+  <div class="modal__box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 class="modal__title" id="modalTitle"></h2>
+    <div class="modal__body" id="modalBody"></div>
+    <div class="field" id="modalCommentField" hidden style="margin-top:var(--sp-4);margin-bottom:0;">
+      <label class="field__label" for="modalComment">コメント（任意）</label>
+      <textarea class="textarea" id="modalComment" placeholder="例）社内で確認が必要なため、今回は見送ります"></textarea>
+    </div>
+    <div class="modal__foot">
+      <button class="btn" type="button" id="modalCancel">キャンセル</button>
+      <button class="btn btn--primary" type="button" id="modalOk">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- 通信中の覆い（押せなくする・「送信しています…」） -->
+<div class="busy" id="busyOverlay" hidden>
+  <div class="busy__box">
+    <span class="busy__spin"></span>
+    <span class="busy__txt" id="busyText">送信しています…</span>
+  </div>
+</div>
+
+<!-- トースト -->
+<div class="toast" id="toast" hidden></div>
+
+<!-- 印刷専用エリア（画面には出さない） -->
+<div class="printarea" id="printArea"></div>
+
+<script>
+'use strict';
+/* ============================================================================
+   DP Sign v0.3  ロジック
+   ============================================================================ */
+
+/* ---------------------------------------------------------------------------
+   窓口（Google Apps Script）の場所
+--------------------------------------------------------------------------- */
+/* ※窓口を作り直したらこの1行を書き換える */
+var GAS_URL = 'https://script.google.com/macros/s/AKfycbz9kEWmlGCe8HIe5E2A0_y__-HAPPcoEunAhqURj_gc_pNE0bgm_giPMytnSFfsrqluCA/exec';
+
+/** 窓口の返事を待つ上限。これを過ぎたら「時間内に応答がありませんでした」と出す */
+var GAS_TIMEOUT_MS = 20000;
+
+/** アドレス欄に付けて呼ぶもの（GET）。ここに無い action は本文にJSONを載せて呼ぶ（POST） */
+var GAS_GET_ACTIONS = { ping: true, get: true, list: true };
+
+/* ---------------------------------------------------------------------------
+   いまが署名画面（相手の画面）かどうかを、いちばん最初に決める
+   ---------------------------------------------------------------------------
+   URL に ?doc= が付いていれば相手の画面。
+   これが true のあいだ、getAdminKey() は必ず空文字を返し、
+   Store.save() はこの端末に何も書かない。
+   ＝ 合言葉（管理キー）が相手の画面の経路に出てこないことを、ここ1か所で保証する。
+--------------------------------------------------------------------------- */
+var isSignScreen = (function () {
+  try {
+    return !!(new URLSearchParams(window.location.search).get('doc'));
+  } catch (e) {
+    console.error('[isSignScreen] URL の解析に失敗', e);
+    return false;
+  }
+})();
+
+/* ---------------------------------------------------------------------------
+   通信中の表示と、二重送信の防止
+   ---------------------------------------------------------------------------
+   通信のあいだは画面全体を覆う（＝どのボタンも押せない）。
+   覆いは重ねて呼ばれても数を数えて、最後の1つが終わったときだけ消す。
+--------------------------------------------------------------------------- */
+var busyCount = 0;
+
+function beginBusy(text) {
+  busyCount++;
+  var t = $('busyText');
+  if (t) { t.textContent = String(text || '送信しています…'); }   // textContent なので HTML は解釈されない
+  var el = $('busyOverlay');
+  if (el) { el.hidden = false; }
+}
+
+function endBusy() {
+  busyCount = (busyCount > 0) ? (busyCount - 1) : 0;
+  if (busyCount === 0) {
+    var el = $('busyOverlay');
+    if (el) { el.hidden = true; }
+  }
+}
+
+function isBusy() { return busyCount > 0; }
+
+/* ---------------------------------------------------------------------------
+   callGas : 窓口とのやりとりは、すべてこの1か所を通す
+   ---------------------------------------------------------------------------
+   ■ POST のとき Content-Type ヘッダを絶対に付けないこと。
+     付けるとブラウザが事前確認（preflight）を送り、Google Apps Script は
+     それに答えられないため必ず失敗する。だから headers は一切指定しない。
+   ■ 送る項目は入れ子にせず、すべてトップレベルに置く。
+   ■ 戻り値は窓口からの JSON をそのまま resolve する。
+     { ok:true, … } か { ok:false, error:'日本語の説明' }。
+     ok が false でも reject しない（呼び出し側が error をそのまま画面に出す）。
+   ■ reject するのは、つながらなかったとき・時間切れ・返事が読めなかったときだけ。
+       第3引数 busyText : 覆いに出す文字。false を渡すと覆いを出さない。
+--------------------------------------------------------------------------- */
+function callGas(action, params, busyText) {
+  var act = String(action || '');
+  var p = (params && typeof params === 'object') ? params : {};
+  var showBusy = (busyText !== false);
+
+  if (showBusy) {
+    beginBusy(typeof busyText === 'string' ? busyText : '送信しています…');
+  }
+
+  var work = new Promise(function (resolve, reject) {
+    if (!GAS_URL) {
+      reject(new Error('窓口のURLが設定されていません。'));
+      return;
+    }
+
+    var url = GAS_URL;
+    var opts;
+    var k;
+
+    if (GAS_GET_ACTIONS[act]) {
+      var qs = 'action=' + encodeURIComponent(act);
+      for (k in p) {
+        if (!Object.prototype.hasOwnProperty.call(p, k)) { continue; }
+        if (p[k] === undefined || p[k] === null) { continue; }
+        qs += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(String(p[k]));
+      }
+      url = GAS_URL + '?' + qs;
+      opts = { method: 'GET' };
+    } else {
+      var body = { action: act };
+      for (k in p) {
+        if (!Object.prototype.hasOwnProperty.call(p, k)) { continue; }
+        if (p[k] === undefined || p[k] === null) { continue; }
+        body[k] = p[k];          // 入れ子にしない。全部トップレベル
+      }
+      // headers は書かない（Content-Type を付けると事前確認が起きて必ず失敗する）
+      opts = { method: 'POST', body: JSON.stringify(body) };
+    }
+
+    var controller = null;
+    try {
+      if (typeof AbortController === 'function') { controller = new AbortController(); }
+    } catch (e) {
+      controller = null;
+    }
+    if (controller) { opts.signal = controller.signal; }
+
+    var finished = false;
+    var timer = setTimeout(function () {
+      if (finished) { return; }
+      finished = true;
+      if (controller) { try { controller.abort(); } catch (e2) { /* 中断できない環境もある */ } }
+      reject(new Error('時間内に応答がありませんでした。電波の良い場所で、もう一度お試しください。'));
+    }, GAS_TIMEOUT_MS);
+
+    fetch(url, opts).then(function (res) {
+      return res.text();
+    }).then(function (text) {
+      if (finished) { return; }
+      finished = true;
+      clearTimeout(timer);
+      var obj = null;
+      try { obj = JSON.parse(text); } catch (e3) { obj = null; }
+      if (!obj || typeof obj !== 'object') {
+        console.error('[callGas] 返事を JSON として読めませんでした', act);
+        reject(new Error('窓口からの返事を読み取れませんでした。時間をおいてもう一度お試しください。'));
+        return;
+      }
+      resolve(obj);
+    }).catch(function (err) {
+      if (finished) { return; }
+      finished = true;
+      clearTimeout(timer);
+      console.error('[callGas] 通信に失敗', act, err);
+      reject(new Error('つながりませんでした。ネットワークをご確認ください。'));
+    });
+  });
+
+  if (!showBusy) { return work; }
+  return work.then(function (obj) {
+    endBusy();
+    return obj;
+  }, function (err) {
+    endBusy();
+    throw err;
+  });
+}
+
+/** 通信が失敗したときの文言を取り出す */
+function errMessage(err, fallback) {
+  if (err && err.message) { return String(err.message); }
+  return String(fallback || 'うまくいきませんでした。');
+}
+
+/* ---------------------------------------------------------------------------
+   合言葉（管理キー）
+   ---------------------------------------------------------------------------
+   コードには書かない。管理画面の［設定］で1回入れて、この端末に置く。
+   署名画面では読まない（isSignScreen が true なら必ず空文字を返す）。
+--------------------------------------------------------------------------- */
+function getAdminKey() {
+  if (isSignScreen) { return ''; }        // 相手の画面では合言葉に触れない
+  try {
+    return String(localStorage.getItem(Store.adminKeyName) || '');
+  } catch (e) {
+    console.error('[getAdminKey] 読み込みに失敗', e);
+    return '';
+  }
+}
+
+function setAdminKey(v) {
+  if (isSignScreen) { return false; }     // 相手の画面では書かない
+  try {
+    var val = String(v == null ? '' : v).trim();
+    if (val) {
+      localStorage.setItem(Store.adminKeyName, val);
+    } else {
+      localStorage.removeItem(Store.adminKeyName);
+    }
+    return true;
+  } catch (e) {
+    console.error('[setAdminKey] 保存に失敗', e);
+    return false;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Store : 保存のやり方をここ1か所に閉じ込める
+   ---------------------------------------------------------------------------
+   ★ 契約の正本は窓口の先のスプレッドシート。この端末に置くのは次の2つだけ。
+       (1) 合言葉（管理キー）
+       (2) 一覧の控え（キャッシュ）。つながらないときに「前回読んだ内容」を出すため
+     load() は窓口から読み直す（非同期）。つながらなければ控えを返す。
+     save() は控えと画面の設定をこの端末に書くだけ（正本ではない）。
+--------------------------------------------------------------------------- */
+var Store = {
+  /* 控えの置き場。キー名は v0.1 から変えない（変えると保存済みの控えが読めなくなる） */
+  cacheKey: 'dp-sign-v1',
+  /* 合言葉の置き場（この端末だけ） */
+  adminKeyName: 'dp-sign-admin-key',
+
+  /** 正本（窓口）から一覧を読み直す。→ Promise<{contracts, fromCache, cachedAt, error, noKey}> */
+  load: function () {
+    var self = this;
+    var key = getAdminKey();
+    if (!key) {
+      return Promise.resolve({
+        contracts: null, fromCache: true, cachedAt: self.cacheStamp(), noKey: true,
+        error: '合言葉（管理キー）がまだ入っていません。［設定］タブで入れてください。'
+      });
+    }
+    return callGas('list', { key: key }, '契約の一覧を読み込んでいます…').then(function (res) {
+      if (!res.ok) {
+        return { contracts: null, fromCache: true, cachedAt: self.cacheStamp(),
+                 error: String(res.error || '一覧を読み込めませんでした。') };
+      }
+      var src = Array.isArray(res.contracts) ? res.contracts : [];
+      var list = [];
+      for (var i = 0; i < src.length; i++) { list.push(fromGasContract(src[i])); }
+      return { contracts: list, fromCache: false, cachedAt: '', error: '' };
+    }).catch(function (err) {
+      return { contracts: null, fromCache: true, cachedAt: self.cacheStamp(),
+               error: errMessage(err, 'つながりませんでした。ネットワークをご確認ください。') };
+    });
+  },
+
+  /** 控えと画面の設定をこの端末に書く。→ Promise<boolean> */
+  save: function (data) {
+    if (isSignScreen) { return Promise.resolve(true); }   // 相手の画面ではこの端末に何も書かない
+    try {
+      var d = (data && typeof data === 'object') ? data : {};
+      var copy = {
+        version: 3,
+        ui: (d.ui && typeof d.ui === 'object') ? d.ui : {},
+        contracts: Array.isArray(d.contracts) ? d.contracts : [],
+        cachedAt: (typeof d.cachedAt === 'string' && d.cachedAt) ? d.cachedAt : isoNow()
+      };
+      localStorage.setItem(this.cacheKey, JSON.stringify(copy));
+      return Promise.resolve(true);
+    } catch (e) {
+      console.error('[Store.save] 控えの保存に失敗', e);
+      return Promise.resolve(false);
+    }
+  },
+
+  /** 控えを読む（同期）。起動直後、通信を待たずに画面を出すために使う */
+  loadCache: function () {
+    try {
+      var raw = localStorage.getItem(this.cacheKey);
+      if (!raw) { return null; }
+      return JSON.parse(raw);
+    } catch (e) {
+      console.error('[Store.loadCache] 控えの読み込みに失敗', e);
+      return null;
+    }
+  },
+
+  /** 控えをいつ取ったか（ISO文字列。無ければ空） */
+  cacheStamp: function () {
+    var d = this.loadCache();
+    return (d && typeof d.cachedAt === 'string') ? d.cachedAt : '';
+  }
+};
+
+/* ---------------------------------------------------------------------------
+   state : 画面が使うデータを1つのオブジェクトで持つ
+--------------------------------------------------------------------------- */
+/* ステータスは3つだけ。ここ以外で文字列を直書きしない。
+   ※ var の代入はホイストされないので、この4つは必ず state の初期化より前に置くこと
+     （normalizeState が読み込み時にこれらを参照する）。 */
+var STATUS = { PENDING: 'pending', SIGNED: 'signed', DECLINED: 'declined' };
+var STATUS_LIST = [STATUS.PENDING, STATUS.SIGNED, STATUS.DECLINED];
+var FILTER_LIST = ['all', STATUS.PENDING, STATUS.SIGNED, STATUS.DECLINED];
+var FEE_TYPES = ['lump', 'monthly', 'daily'];
+var TAB_LIST = ['create', 'list', 'settings'];
+
+/* 署名画面では控えを読まない（当社の契約一覧を相手の画面に持ち込まない） */
+var state = normalizeState(isSignScreen ? null : Store.loadCache());
+
+/* ---------------------------------------------------------------------------
+   窓口から返ってきた契約1件を、画面が使う形にそろえる
+   ---------------------------------------------------------------------------
+   ?action=list は type / status、?action=get は typeKey / statusKey で返すので、
+   どちらでも読めるようにしてある。
+   締結・辞退の記録（recordJson）は窓口では record 1つにまとまっているので、
+   ステータスを見て record（締結）と decline（辞退）に振り分ける。
+--------------------------------------------------------------------------- */
+function fromGasContract(g) {
+  var src = (g && typeof g === 'object') ? g : {};
+  var status = String(src.status || src.statusKey || STATUS.PENDING);
+  if (STATUS_LIST.indexOf(status) === -1) { status = STATUS.PENDING; }
+  var rec = (src.record && typeof src.record === 'object') ? src.record : null;
+
+  return {
+    id: String(src.id == null ? '' : src.id),      // 契約IDは文字列のまま（Number にしない）
+    token: String(src.token == null ? '' : src.token),
+    type: String(src.type || src.typeKey || ''),
+    title: String(src.title || ''),
+    partyName: String(src.partyName || ''),
+    partyEmail: String(src.partyEmail || ''),
+    workDesc: String(src.workDesc || ''),
+    feeType: (FEE_TYPES.indexOf(String(src.feeType)) === -1) ? 'lump' : String(src.feeType),
+    amount: (src.amount === undefined || src.amount === null) ? '' : String(src.amount),
+    startDate: String(src.startDate || ''),
+    endDate: String(src.endDate || ''),
+    deadline: String(src.deadline || ''),
+    note: String(src.note || ''),
+    code: String(src.code || ''),                  // 一覧にだけ入る。署名画面には返ってこない
+    body: String(src.body || ''),
+    status: status,
+    createdAt: String(src.createdAt || ''),
+    createdAtJst: String(src.createdAtJst || ''),
+    openedAt: String(src.openedAt || ''),
+    openedAtJst: String(src.openedAtJst || ''),
+    record: (status === STATUS.DECLINED) ? null : rec,
+    decline: (status === STATUS.DECLINED) ? rec : null,
+    codeAttempts: Number(src.codeAttempts) || 0,
+    codeLocked: !!src.codeLocked,
+    attemptsLeft: (typeof src.attemptsLeft === 'number') ? src.attemptsLeft : null
+  };
+}
+
+/* 控えを読んでも壊れないように、足りない項目は既定値で埋める。
+   （v0.1 の控えには title / deadline / feeType / openedAt / decline / token が無い） */
+function normalizeState(loaded) {
+  var s = loaded && typeof loaded === 'object' ? loaded : {};
+  if (!Array.isArray(s.contracts)) { s.contracts = []; }
+  if (!s.ui || typeof s.ui !== 'object') { s.ui = {}; }
+  if (TAB_LIST.indexOf(s.ui.tab) === -1) { s.ui.tab = 'create'; }
+  if (FILTER_LIST.indexOf(s.ui.filter) === -1) { s.ui.filter = 'all'; }
+  if (typeof s.cachedAt !== 'string') { s.cachedAt = ''; }
+  s.version = 3;
+  // 契約IDは必ず文字列で扱う（Number 変換はしない）
+  s.contracts = s.contracts.filter(function (c) { return c && typeof c === 'object'; });
+  s.contracts.forEach(function (c) {
+    c.id = String(c.id == null ? '' : c.id);
+    c.code = String(c.code == null ? '' : c.code);
+    c.token = String(c.token == null ? '' : c.token);   // 署名用URLに要る（v0.1 の控えには無い）
+    if (STATUS_LIST.indexOf(c.status) === -1) { c.status = STATUS.PENDING; }
+    // v0.2 で足した項目（古いデータには無い）
+    c.title = (typeof c.title === 'string') ? c.title : '';
+    c.deadline = (typeof c.deadline === 'string') ? c.deadline : '';
+    c.feeType = (FEE_TYPES.indexOf(c.feeType) === -1) ? 'lump' : c.feeType;
+    c.openedAt = (typeof c.openedAt === 'string') ? c.openedAt : '';
+    c.openedAtJst = (typeof c.openedAtJst === 'string') ? c.openedAtJst : '';
+    c.body = (typeof c.body === 'string') ? c.body : '';
+    c.partyEmail = (typeof c.partyEmail === 'string') ? c.partyEmail : '';
+    if (!c.record || typeof c.record !== 'object') { c.record = null; }
+    if (!c.decline || typeof c.decline !== 'object') { c.decline = null; }
+    c.codeAttempts = Number(c.codeAttempts) || 0;
+    c.codeLocked = !!c.codeLocked;
+    // 締結／辞退の記録が無いのに状態だけ進んでいるデータは、送信待ちに戻す
+    if (c.status === STATUS.SIGNED && !c.record) { c.status = STATUS.PENDING; }
+    if (c.status === STATUS.DECLINED && !c.decline) { c.status = STATUS.PENDING; }
+  });
+  return s;
+}
+
+/* 控え（この端末）に書く。契約の正本は窓口の先のスプレッドシート。
+   戻りは Promise だが、控えの保存なので呼び出し側は待たなくてよい。 */
+function saveState() {
+  state.cachedAt = isoNow();
+  return Store.save(state).then(function (ok) {
+    if (!ok) { toast('控えを保存できませんでした'); }
+    return ok;
+  });
+}
+
+/* ---------------------------------------------------------------------------
+   汎用ユーティリティ
+--------------------------------------------------------------------------- */
+
+/** XSS対策: 画面に出す文字は必ずここを通す */
+function escapeHtml(v) {
+  if (v === null || v === undefined) { return ''; }
+  return String(v).replace(/[&<>"'`=\/]/g, function (ch) {
+    switch (ch) {
+      case '&': return '&amp;';
+      case '<': return '&lt;';
+      case '>': return '&gt;';
+      case '"': return '&quot;';
+      case "'": return '&#39;';
+      case '`': return '&#96;';
+      case '=': return '&#61;';
+      case '/': return '&#47;';
+      default: return ch;
+    }
+  });
+}
+
+function $(id) { return document.getElementById(id); }
+
+/* ---------------------------------------------------------------------------
+   乱数まわり（randomDigits / randomToken / uuidv4 / makeContractId）
+   ---------------------------------------------------------------------------
+   ★ v0.3 では、契約ID・確認コード（4桁）・閲覧トークンは
+     すべて窓口（サーバー）が発行する。画面側では作らない。
+     台帳と食い違う番号が生まれないようにするため、ここから呼び出してはいけない。
+     v0.2 までの作りを追えるように関数は残してあるが、いまは使っていない。
+--------------------------------------------------------------------------- */
+
+function randomDigits(n) {
+  var out = '';
+  var i;
+  if (window.crypto && window.crypto.getRandomValues) {
+    var buf = new Uint32Array(n);
+    window.crypto.getRandomValues(buf);
+    for (i = 0; i < n; i++) { out += String(buf[i] % 10); }
+  } else {
+    for (i = 0; i < n; i++) { out += String(Math.floor(Math.random() * 10)); }
+  }
+  return out;
+}
+
+function randomToken(n) {
+  var chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  var out = '';
+  var i;
+  if (window.crypto && window.crypto.getRandomValues) {
+    var buf = new Uint32Array(n);
+    window.crypto.getRandomValues(buf);
+    for (i = 0; i < n; i++) { out += chars.charAt(buf[i] % chars.length); }
+  } else {
+    for (i = 0; i < n; i++) { out += chars.charAt(Math.floor(Math.random() * chars.length)); }
+  }
+  return out;
+}
+
+/** UUID v4（外部ライブラリ不使用）。
+    crypto.randomUUID があればそれを使い、無ければ乱数から v4 の形を組み立てる。 */
+function uuidv4() {
+  try {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return String(window.crypto.randomUUID()).toUpperCase();
+    }
+  } catch (e) {
+    /* 安全でない文脈では randomUUID が使えないことがある。下の手組みに落とす */
+  }
+  var b = new Array(16);
+  var i;
+  if (window.crypto && window.crypto.getRandomValues) {
+    var buf = new Uint8Array(16);
+    window.crypto.getRandomValues(buf);
+    for (i = 0; i < 16; i++) { b[i] = buf[i]; }
+  } else {
+    for (i = 0; i < 16; i++) { b[i] = Math.floor(Math.random() * 256); }
+  }
+  b[6] = (b[6] & 0x0f) | 0x40;   // version 4
+  b[8] = (b[8] & 0x3f) | 0x80;   // variant 10
+  var hex = '';
+  for (i = 0; i < 16; i++) { hex += (b[i] < 16 ? '0' : '') + b[i].toString(16); }
+  return (hex.slice(0, 8) + '-' + hex.slice(8, 12) + '-' + hex.slice(12, 16) + '-' +
+          hex.slice(16, 20) + '-' + hex.slice(20)).toUpperCase();
+}
+
+/** 契約ID（＝証明書の契約番号）は文字列。Number() は絶対に通さない。
+    v0.2 から UUID 形式。v0.1 で作った DPS-… 形式の契約はそのまま残す。 */
+function makeContractId() {
+  return uuidv4();
+}
+
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+/** Date を input[type=date] 用の YYYY-MM-DD にする（端末の暦で） */
+function toYmd(d) {
+  return String(d.getFullYear()) + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+}
+
+/** 今日から n 日後の YYYY-MM-DD */
+function ymdPlusDays(n) {
+  var d = new Date();
+  d.setDate(d.getDate() + Number(n || 0));
+  return toYmd(d);
+}
+
+/** ISO8601（UTC基準の標準表記） */
+function isoNow() { return new Date().toISOString(); }
+
+/** JST 表記（例: 2026年9月11日(木) 17:32:05 JST） */
+function toJst(iso) {
+  var d = iso ? new Date(iso) : new Date();
+  if (isNaN(d.getTime())) { return ''; }
+  try {
+    var fmt = new Intl.DateTimeFormat('ja-JP', {
+      timeZone: 'Asia/Tokyo',
+      year: 'numeric', month: 'long', day: 'numeric', weekday: 'short',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    });
+    return fmt.format(d) + ' JST';
+  } catch (e) {
+    return d.toString();
+  }
+}
+
+/** 日付入力(YYYY-MM-DD)を和暦まじりにせず素直に表示 */
+function formatDate(ymd) {
+  if (!ymd) { return '（未設定）'; }
+  var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(ymd));
+  if (!m) { return String(ymd); }
+  return m[1] + '年' + String(Number(m[2])) + '月' + String(Number(m[3])) + '日';
+}
+
+function formatAmount(v) {
+  var n = Number(v);           // 金額のみ数値化。契約IDには使わない
+  if (!isFinite(n)) { return '0'; }
+  return n.toLocaleString('ja-JP');
+}
+
+function formatCreatedAt(iso) {
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) { return ''; }
+  try {
+    return new Intl.DateTimeFormat('ja-JP', {
+      timeZone: 'Asia/Tokyo', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(d);
+  } catch (e) {
+    return d.toLocaleString();
+  }
+}
+
+/** SHA-256（外部ライブラリ不使用。crypto.subtle のみ）
+    注意: crypto.subtle は安全な文脈（https / localhost / file）でしか使えない。
+    使えない環境では null を返し、締結記録に「計算できず」と正直に残す。 */
+function sha256Hex(text) {
+  var cryptoObj = (typeof window !== 'undefined' && window.crypto) ? window.crypto
+                : ((typeof self !== 'undefined' && self.crypto) ? self.crypto : null);
+  var Enc = (typeof TextEncoder !== 'undefined') ? TextEncoder : null;
+  if (!cryptoObj || !cryptoObj.subtle || !Enc) {
+    console.warn('[sha256Hex] この環境では crypto.subtle が使えません');
+    return Promise.resolve(null);
+  }
+  var bytes = new Enc().encode(String(text));
+  return cryptoObj.subtle.digest('SHA-256', bytes).then(function (buf) {
+    var arr = Array.prototype.slice.call(new Uint8Array(buf));
+    return arr.map(function (b) { return (b < 16 ? '0' : '') + b.toString(16); }).join('');
+  }).catch(function (e) {
+    console.error('[sha256Hex] 計算に失敗', e);
+    return null;
+  });
+}
+
+/** 手書きサイン画像の src。PNGのデータURL以外は受け付けない（万一の混入を断つ） */
+function safeImageSrc(dataUrl) {
+  var v = String(dataUrl || '');
+  return /^data:image\/png;base64,[A-Za-z0-9+\/=]+$/.test(v) ? v : '';
+}
+
+/** 指紋を読みやすく4文字ずつ区切る */
+function groupHash(hex) {
+  if (!hex) { return ''; }
+  return String(hex).replace(/(.{4})/g, '$1 ').trim();
+}
+
+/** トースト通知 */
+var _toastTimer = null;
+function toast(message) {
+  var el = $('toast');
+  if (!el) { return; }
+  el.textContent = String(message);   // textContent なので HTML は解釈されない
+  el.hidden = false;
+  // 表示状態を確実に切り替えるため一度レイアウトを読む
+  void el.offsetWidth;
+  el.classList.add('is-show');
+  if (_toastTimer) { clearTimeout(_toastTimer); }
+  _toastTimer = setTimeout(function () {
+    el.classList.remove('is-show');
+    setTimeout(function () { el.hidden = true; }, 260);
+  }, 2200);
+}
+
+/** クリップボードへコピー。失敗したら選択可能な入力欄を出す */
+function copyText(text, fallbackInputId) {
+  var fb = fallbackInputId ? $(fallbackInputId) : null;
+
+  function showFallback() {
+    if (!fb) { toast('コピーできませんでした'); return; }
+    fb.hidden = false;
+    fb.value = String(text);
+    fb.focus();
+    fb.select();
+    try { fb.setSelectionRange(0, 99999); } catch (e) { /* 一部環境で未対応 */ }
+    toast('手動でコピーしてください');
+  }
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(String(text)).then(function () {
+      if (fb) { fb.hidden = true; }
+      toast('コピーしました');
+    }).catch(function (e) {
+      console.warn('[copyText] clipboard 失敗', e);
+      showFallback();
+    });
+  } else {
+    showFallback();
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   確認モーダル
+   ---------------------------------------------------------------------------
+   window.confirm は使わず、アプリ内のモーダルで統一する。
+   本文は lines（ただの文字列の配列）で渡す。中で必ず escapeHtml を通す。
+--------------------------------------------------------------------------- */
+var modalCtx = { onOk: null, withComment: false };
+
+/**
+ * @param {Object} opts
+ *   title      : 見出し（文字列）
+ *   lines      : 本文の行（文字列の配列）
+ *   withComment: コメント欄を出すか
+ *   okLabel    : 実行ボタンの文字
+ *   danger     : 実行ボタンを赤くするか
+ *   onOk       : function(comment) 実行時に呼ばれる
+ */
+function openModal(opts) {
+  var o = opts || {};
+  var box = $('modal');
+  var titleEl = $('modalTitle');
+  var bodyEl = $('modalBody');
+  var cmtField = $('modalCommentField');
+  var cmt = $('modalComment');
+  var okBtn = $('modalOk');
+  if (!box || !titleEl || !bodyEl || !okBtn) { return; }
+
+  titleEl.textContent = String(o.title || '確認');   // textContent なので HTML は解釈されない
+
+  var lines = Array.isArray(o.lines) ? o.lines : [];
+  var html = '';
+  for (var i = 0; i < lines.length; i++) {
+    html += '<div class="modal__line">' + escapeHtml(lines[i]) + '</div>';
+  }
+  bodyEl.innerHTML = html;                            // 各行は escapeHtml 済み
+
+  modalCtx.withComment = !!o.withComment;
+  modalCtx.onOk = (typeof o.onOk === 'function') ? o.onOk : null;
+
+  if (cmtField) { cmtField.hidden = !modalCtx.withComment; }
+  if (cmt) { cmt.value = ''; }
+
+  okBtn.textContent = String(o.okLabel || 'OK');
+  okBtn.classList.toggle('btn--danger', !!o.danger);
+  okBtn.classList.toggle('btn--primary', !o.danger);
+
+  box.hidden = false;
+}
+
+function closeModal() {
+  var box = $('modal');
+  if (box) { box.hidden = true; }
+  modalCtx.onOk = null;
+  modalCtx.withComment = false;
+}
+
+function confirmModal() {
+  var fn = modalCtx.onOk;
+  var cmt = $('modalComment');
+  var comment = (modalCtx.withComment && cmt) ? String(cmt.value).trim() : '';
+  closeModal();
+  if (fn) { fn(comment); }
+}
+
+/* ---------------------------------------------------------------------------
+   契約書の雛形（3種）
+   ---------------------------------------------------------------------------
+   ※この文案は仮のものです。実際の締結前に必ず内容をご確認ください。
+     一般的な条項だけで構成しており、特定の書式を写したものではありません。
+--------------------------------------------------------------------------- */
+var DISCLAIMER = '※この文案は仮のものです。実際の締結前に必ず内容をご確認ください。';
+
+var CONTRACT_TYPES = {
+  gyomu:  { key: 'gyomu',  label: '業務委託契約書',        needsAmount: true  },
+  nda:    { key: 'nda',    label: '秘密保持契約書（NDA）', needsAmount: false },
+  ukesho: { key: 'ukesho', label: '注文請書',              needsAmount: true  }
+};
+
+function typeLabel(key) {
+  var t = CONTRACT_TYPES[key];
+  return t ? t.label : '（不明な種類）';
+}
+
+var COMPANY_NAME = '株式会社データパレード';
+
+/* 証明書に出す「契約作成者」（当社側）。運用に合わせて書き換えてよい */
+var CREATOR_NAME  = '株式会社データパレード 契約担当';
+var CREATOR_EMAIL = 'info@data-parade.com';
+
+/* 本人確認の強さ。証明書の「セキュリティレベル」欄に出す */
+var SECURITY_LEVEL = 'メールアドレス＋確認コード認証';
+
+/* 報酬の形（業務委託契約書だけで使う） */
+var FEE_TYPE_LABELS = {
+  lump:    '一括（総額）',
+  monthly: '月額',
+  daily:   '人日単価'
+};
+
+function feeTypeLabel(key) {
+  return FEE_TYPE_LABELS[key] || FEE_TYPE_LABELS.lump;
+}
+
+/** 金額入力欄の見出し。報酬の形で変える */
+function amountLabelFor(type, feeType) {
+  if (type !== 'gyomu') { return '金額（円・税抜）'; }
+  if (feeType === 'monthly') { return '月額報酬（円・税抜）'; }
+  if (feeType === 'daily') { return '1人日あたりの単価（円・税抜）'; }
+  return '金額（円・税抜）';
+}
+
+/** 契約名。未入力なら「種類_相手先名」を使う */
+function contractTitle(c) {
+  var t = c && typeof c.title === 'string' ? c.title.trim() : '';
+  if (t) { return t; }
+  return defaultTitleFor(c ? c.type : '', c ? c.partyName : '');
+}
+
+function defaultTitleFor(type, partyName) {
+  var name = String(partyName || '').trim();
+  return typeLabel(type) + '_' + (name || '（相手先名 未入力）');
+}
+
+/** 契約書の本文を作る（戻り値はプレーンテキスト） */
+function buildContractText(c) {
+  var party = c.partyName || '（相手先名 未入力）';
+  var work  = c.workDesc  || '（業務内容 未入力）';
+  var mail  = c.partyEmail || '（未登録）';
+  var start = formatDate(c.startDate);
+  var end   = formatDate(c.endDate);
+  var note  = c.note ? c.note : '（特になし）';
+  var amt   = formatAmount(c.amount);
+
+  if (c.type === 'nda') {
+    return [
+      '秘密保持契約書',
+      '',
+      DISCLAIMER,
+      '',
+      COMPANY_NAME + '（以下「甲」という。）と ' + party + '（以下「乙」という。）とは、',
+      '甲乙間の取引の検討及び実施（以下「本目的」という。）に関し、次のとおり秘密保持契約（以下「本契約」という。）を締結する。',
+      '',
+      '第1条（目的）',
+      '本契約は、本目的のために甲乙が相互に開示する情報の取扱いについて定めることを目的とする。',
+      '',
+      '第2条（対象となる情報）',
+      '甲が乙に対し、又は乙が甲に対し、本目的に関連して開示する技術上、営業上その他一切の情報を秘密情報とする。',
+      '対象となる具体的な事項は次のとおりとする。',
+      work,
+      '',
+      '第3条（秘密保持）',
+      '1. 受領者は、秘密情報を善良な管理者の注意をもって管理し、開示者の事前の書面（電磁的記録を含む。以下同じ。）による承諾なく第三者に開示又は漏洩してはならない。',
+      '2. 受領者は、秘密情報を本目的以外に使用してはならない。',
+      '3. 受領者は、本目的の遂行に必要な範囲で、自己の役員及び従業員に限り秘密情報を開示することができる。この場合、受領者は当該者に本契約と同等の義務を負わせるものとする。',
+      '',
+      '第4条（適用除外）',
+      '次の各号のいずれかに該当する情報は、秘密情報に含まれない。',
+      '(1) 開示を受けた時点で既に公知であった情報',
+      '(2) 開示を受けた後、受領者の責めによらず公知となった情報',
+      '(3) 開示を受けた時点で既に受領者が正当に保有していた情報',
+      '(4) 受領者が正当な権限を有する第三者から秘密保持義務を負うことなく取得した情報',
+      '(5) 秘密情報によらず受領者が独自に開発した情報',
+      '',
+      '第5条（有効期間）',
+      '本契約の有効期間は、' + start + ' から ' + end + ' までとする。',
+      'ただし、第3条の義務は、本契約終了後も3年間存続する。',
+      '',
+      '第6条（知的財産権）',
+      '秘密情報の開示は、当該情報に関する知的財産権の譲渡又は実施許諾を意味するものではない。',
+      '',
+      '第7条（返還・廃棄）',
+      '受領者は、本契約が終了したとき又は開示者から請求を受けたときは、秘密情報を記録した媒体を速やかに返還し、又は廃棄する。',
+      '',
+      '第8条（反社会的勢力の排除）',
+      '1. 甲及び乙は、自己又は自己の役員が、暴力団、暴力団員その他これらに準ずる反社会的勢力（以下「反社会的勢力」という。）に該当しないこと、及び反社会的勢力と社会的に非難されるべき関係を有しないことを表明し、保証する。',
+      '2. 甲又は乙は、相手方が前項に違反したと認めるときは、何らの催告を要せず、直ちに本契約の全部又は一部を解除することができる。',
+      '',
+      '第9条（協議事項）',
+      '本契約に定めのない事項又は本契約の解釈に疑義が生じた事項については、甲乙誠意をもって協議の上、これを解決する。',
+      '',
+      '（備考）',
+      note,
+      '',
+      '本契約の成立を証するため、甲乙は本書を電磁的記録により作成し、それぞれ電子的な方法により合意の意思表示を行う。',
+      '',
+      '甲：' + COMPANY_NAME,
+      '乙：' + party,
+      '　（連絡先：' + mail + '）'
+    ].join('\n');
+  }
+
+  if (c.type === 'ukesho') {
+    return [
+      '注文請書',
+      '',
+      DISCLAIMER,
+      '',
+      party + '（以下「受注者」という。）は、' + COMPANY_NAME + '（以下「発注者」という。）から',
+      '下記のとおり注文を受け、これを請けることを承諾する。',
+      '',
+      '記',
+      '',
+      '1. 件名・業務内容',
+      work,
+      '',
+      '2. 請負金額',
+      '金 ' + amt + ' 円（消費税等別途）',
+      '',
+      '3. 履行期間',
+      start + ' から ' + end + ' まで',
+      '',
+      '4. 支払条件',
+      '受注者からの請求書を発注者が受領した月の翌月末日までに、受注者が指定する金融機関口座へ振り込む方法により支払う。振込手数料は発注者の負担とする。',
+      '',
+      '5. 検査',
+      '発注者は、成果物の引渡しを受けた日から10営業日以内に検査を行い、その結果を受注者に通知する。当該期間内に通知がない場合は、検査に合格したものとみなす。',
+      '',
+      '6. 秘密保持',
+      '受注者は、本注文の履行により知り得た発注者の技術上、営業上その他一切の情報を、発注者の事前の書面（電磁的記録を含む。）による承諾なく第三者に開示又は漏洩してはならない。この義務は本注文の完了後も3年間存続する。',
+      '',
+      '7. 知的財産権',
+      '成果物に関する著作権（著作権法第27条及び第28条に定める権利を含む。）その他の知的財産権は、発注者が請負金額を支払った時をもって受注者から発注者に移転する。ただし、受注者が本注文以前から保有していた知的財産権は、受注者に留保される。',
+      '',
+      '8. 反社会的勢力の排除',
+      '発注者及び受注者は、自己又は自己の役員が、暴力団、暴力団員その他これらに準ずる反社会的勢力に該当せず、かつこれらと社会的に非難されるべき関係を有しないことを表明し、保証する。相手方がこれに違反したと認めるときは、何らの催告を要せず直ちに本注文に係る契約を解除することができる。',
+      '',
+      '9. 協議事項',
+      '本書に定めのない事項又は本書の解釈に疑義が生じた事項については、両者誠意をもって協議の上、これを解決する。',
+      '',
+      '（備考）',
+      note,
+      '',
+      '以上',
+      '',
+      '発注者：' + COMPANY_NAME,
+      '受注者：' + party,
+      '　（連絡先：' + mail + '）'
+    ].join('\n');
+  }
+
+  /* 既定は業務委託契約書（準委任） */
+  var feeType = (FEE_TYPES.indexOf(c.feeType) === -1) ? 'lump' : c.feeType;
+
+  /* 第3条（報酬）: 報酬の形で中身が変わる */
+  var art3 = [];
+  if (feeType === 'monthly') {
+    art3 = [
+      '1. 甲は、本業務の対価として、乙に対し月額金 ' + amt + ' 円（消費税等別途）を支払う。',
+      '2. 契約期間の初月及び最終月が1か月に満たない場合の報酬は、当該月の暦日数による日割りとする。',
+      '3. 本業務の遂行に通常必要となる費用は、前2項の報酬に含まれるものとする。ただし、甲乙が事前に書面（電磁的記録を含む。以下同じ。）で合意した費用については、この限りでない。'
+    ];
+  } else if (feeType === 'daily') {
+    art3 = [
+      '1. 甲は、本業務の対価として、乙に対し1人日あたり金 ' + amt + ' 円（消費税等別途）の単価により算出した額を支払う。',
+      '2. 前項の額は、乙の稼働時間の実績にもとづき、1人日 = 8時間として1か月ごとに精算する。',
+      '3. 乙は、毎月末日までに当該月の稼働時間の実績を甲に報告する。',
+      '4. 本業務の遂行に通常必要となる費用は、前3項の報酬に含まれるものとする。ただし、甲乙が事前に書面（電磁的記録を含む。以下同じ。）で合意した費用については、この限りでない。'
+    ];
+  } else {
+    art3 = [
+      '1. 甲は、本業務の対価として、乙に対し金 ' + amt + ' 円（消費税等別途）を支払う。',
+      '2. 本業務の遂行に通常必要となる費用は、前項の報酬に含まれるものとする。ただし、甲乙が事前に書面（電磁的記録を含む。以下同じ。）で合意した費用については、この限りでない。'
+    ];
+  }
+
+  /* 第4条（支払期日）: 報酬の形で締め日の書き方が変わる */
+  var art4;
+  if (feeType === 'monthly') {
+    art4 = '甲は、前条の報酬について毎月末日を締め日とし、乙からの請求書を受領した月の翌月末日までに、乙が指定する金融機関口座に振り込む方法により支払う。振込手数料は甲の負担とする。';
+  } else if (feeType === 'daily') {
+    art4 = '甲は、前条により月ごとに精算した報酬について毎月末日を締め日とし、乙からの請求書を受領した月の翌月末日までに、乙が指定する金融機関口座に振り込む方法により支払う。振込手数料は甲の負担とする。';
+  } else {
+    art4 = '甲は、前条の報酬を、乙からの請求書を受領した月の翌月末日までに、乙が指定する金融機関口座に振り込む方法により支払う。振込手数料は甲の負担とする。';
+  }
+
+  return [
+    '業務委託契約書',
+    '',
+    DISCLAIMER,
+    '',
+    COMPANY_NAME + '（以下「甲」という。）と ' + party + '（以下「乙」という。）とは、',
+    '甲が乙に委託する業務に関し、次のとおり業務委託契約（以下「本契約」という。）を締結する。',
+    '',
+    '第1条（目的及び契約の性質）',
+    '1. 本契約は、甲が乙に対して業務を委託し、乙がこれを受託することに関する事項を定めることを目的とする。',
+    '2. 本業務は、民法第656条に定める準委任契約とし、乙は善良な管理者の注意をもって本業務を遂行する。本契約は成果物の完成を目的とするものではない。',
+    '',
+    '第2条（委託業務）',
+    '甲が乙に委託する業務（以下「本業務」という。）の内容は、次のとおりとする。',
+    work,
+    '',
+    '第3条（報酬・' + feeTypeLabel(feeType) + '）'
+  ].concat(art3).concat([
+    '',
+    '第4条（支払期日）',
+    art4,
+    '',
+    '第5条（契約期間）',
+    '1. 本契約の有効期間は、' + start + ' から ' + end + ' までとする。',
+    '2. 期間の延長は、甲乙書面（電磁的記録を含む。）による合意によって行う。',
+    '',
+    '第6条（秘密保持）',
+    '1. 甲及び乙は、本契約の遂行により知り得た相手方の技術上、営業上その他一切の情報を、相手方の事前の書面による承諾なく第三者に開示又は漏洩してはならない。',
+    '2. 甲が第三者（甲の顧客を含む。）から秘密保持義務を負って開示を受けた情報についても、前項の秘密情報に含まれるものとする。乙は、当該情報を本業務の遂行以外の目的に使用してはならない。',
+    '3. 前2項の義務は、本契約終了後も3年間存続する。',
+    '',
+    '第7条（貸与品）',
+    '1. 甲は、本業務の遂行のために必要な機器等（以下「貸与品」という。）を乙に貸与することがある。',
+    '2. 乙は、貸与品を善良な管理者の注意をもって管理し、本業務の遂行以外の目的に使用してはならない。',
+    '3. 乙は、本契約が終了したとき又は甲から請求を受けたときは、甲の指示に従い速やかに貸与品を返還する。',
+    '',
+    '第8条（知的財産権）',
+    '1. 本業務の遂行の過程で乙が作成した資料等の著作権（著作権法第27条及び第28条に定める権利を含む。）その他の知的財産権は、甲が乙に本契約所定の報酬を支払った時をもって、乙から甲に移転する。',
+    '2. 前項は、乙に成果物の完成義務を負わせるものではない。',
+    '3. 第1項にかかわらず、乙が本契約締結前から保有していた知的財産権及び乙が本業務の遂行を通じて得た汎用的な技術・ノウハウは、乙に留保される。',
+    '',
+    '第9条（再委託）',
+    '乙は、甲の事前の書面による承諾を得た場合に限り、本業務の全部又は一部を第三者に再委託することができる。',
+    '',
+    '第10条（反社会的勢力の排除）',
+    '1. 甲及び乙は、自己又は自己の役員が、暴力団、暴力団員その他これらに準ずる反社会的勢力（以下「反社会的勢力」という。）に該当しないこと、及び反社会的勢力と社会的に非難されるべき関係を有しないことを表明し、保証する。',
+    '2. 甲又は乙は、相手方が前項に違反したと認めるときは、何らの催告を要せず、直ちに本契約の全部又は一部を解除することができる。',
+    '',
+    '第11条（協議事項）',
+    '本契約に定めのない事項又は本契約の解釈に疑義が生じた事項については、甲乙誠意をもって協議の上、これを解決する。',
+    '',
+    '（備考）',
+    note,
+    '',
+    '本契約の成立を証するため、甲乙は本書を電磁的記録により作成し、それぞれ電子的な方法により合意の意思表示を行う。',
+    '',
+    '甲：' + COMPANY_NAME,
+    '乙：' + party,
+    '　（連絡先：' + mail + '）'
+  ]).join('\n');
+}
+
+/* ---------------------------------------------------------------------------
+   相手に送るメールの文案
+   ---------------------------------------------------------------------------
+   Gmail にそのまま貼れるプレーンテキスト。件名も1行目に入れてある。
+--------------------------------------------------------------------------- */
+function buildMailText(c) {
+  var title = contractTitle(c);
+  var deadline = c.deadline ? formatDate(c.deadline) : '（未設定）';
+  /* 件名の［DPサイン］はカタカナのまま。窓口（gas-code.gs）が実際に送る件名と
+     食い違わないようにするため、ここは合わせてある。 */
+  return [
+    '件名：［DPサイン］' + COMPANY_NAME + 'より契約書の対応依頼です',
+    '',
+    (c.partyName || '（相手先名）') + ' 様',
+    '',
+    COMPANY_NAME + 'より電子契約書「' + title + '」をお送りします。',
+    '下記のリンクからご確認のうえ、ご対応をお願いいたします。',
+    '',
+    '契約名：' + title,
+    '手続きの完了期限：' + deadline,
+    'この契約におけるあなたの役割は 署名者 です。',
+    '',
+    '▼契約書はこちら',
+    signUrlFor(c.id, c.token),
+    '',
+    '▼確認コード（4桁）',
+    'この案内とは別に、お電話またはチャットでお伝えします。',
+    '',
+    '完了期限を過ぎた場合は、お手数ですがご連絡ください。',
+    '────────────────────────────',
+    '本メールは ' + COMPANY_NAME + ' が運用する電子契約の仕組みから',
+    'ご案内しているものです。',
+    'このメールに心当たりがない場合は、お手数ですが送信者へ直接お問い合わせください。'
+  ].join('\n');
+}
+
+/* ---------------------------------------------------------------------------
+   契約データの取り回し
+--------------------------------------------------------------------------- */
+
+function findContract(id) {
+  var key = String(id);           // 契約IDは文字列のまま比較する
+  for (var i = 0; i < state.contracts.length; i++) {
+    if (String(state.contracts[i].id) === key) { return state.contracts[i]; }
+  }
+  return null;
+}
+
+/** 一覧に無くても、直前に作った契約なら見つける（作成直後に一覧の読み直しが失敗したとき用） */
+function findContractOrLast(id) {
+  var c = findContract(id);
+  if (c) { return c; }
+  if (lastCreated && String(lastCreated.id) === String(id)) { return lastCreated; }
+  return null;
+}
+
+/** アプリ本体（このHTML）が置かれているURL。窓口へ appUrl として渡すのもこれ */
+function appBaseUrl() {
+  return location.href.split('#')[0].split('?')[0];
+}
+
+/** 署名用URL。?doc=<契約ID>&t=<閲覧トークン> の形。
+    トークンが無いと相手は開けない（窓口が中身を返さない）ので、必ず付ける。 */
+function signUrlFor(id, token) {
+  var url = appBaseUrl() + '?doc=' + encodeURIComponent(String(id));
+  var t = String(token || '');
+  if (t) { url += '&t=' + encodeURIComponent(t); }
+  return url;
+}
+
+/* ---------------------------------------------------------------------------
+   管理画面 : 窓口とのやりとり（読み直し・赤い帯・設定）
+--------------------------------------------------------------------------- */
+
+/** 赤い帯を出す。控えを見せていることもここで伝える */
+function showNetBar(message) {
+  var el = $('netBar');
+  if (!el) { return; }
+  var txt = String(message || 'つながりませんでした。ネットワークをご確認ください。');
+  if (state.contracts.length) {
+    var stamp = state.cachedAt ? toJst(state.cachedAt) : '';
+    txt += '\nいま出ている一覧は、前回読んだときの控え' + (stamp ? '（' + stamp + ' 時点）' : '') + 'です。';
+  }
+  el.textContent = txt;        // textContent なので HTML は解釈されない
+  el.hidden = false;
+}
+
+function hideNetBar() {
+  var el = $('netBar');
+  if (el) { el.hidden = true; }
+}
+
+/** 正本（窓口）から一覧を読み直す。つながらなければ控えのまま赤い帯を出す */
+function reloadFromServer() {
+  return Store.load().then(function (res) {
+    if (res.contracts) {
+      state.contracts = res.contracts;
+      saveState();
+      hideNetBar();
+    } else {
+      showNetBar(res.error);
+    }
+    renderList();
+    return res;
+  });
+}
+
+/** 合言葉が未設定のときの案内 */
+function guideToSettings() {
+  toast('合言葉を入れてください');
+  showNetBar('合言葉（管理キー）がまだ入っていません。［設定］タブで入れてください。');
+  switchTab('settings');
+  var el = $('setKeyInput');
+  if (el && el.focus) { el.focus(); }
+}
+
+/** 設定タブの表示を合わせる（合言葉そのものは画面に出さない） */
+function renderSettings() {
+  var has = !!getAdminKey();
+  showMsg('setKeyMsg', has ? 'この端末には合言葉が入っています。' : '合言葉がまだ入っていません。',
+          has ? 'ok' : 'err');
+}
+
+/** 合言葉を保存する */
+function onSaveAdminKey() {
+  var el = $('setKeyInput');
+  var val = el ? String(el.value).trim() : '';
+  if (!val) { showMsg('setKeyMsg', '合言葉を入力してください。', 'err'); return; }
+  if (!setAdminKey(val)) { showMsg('setKeyMsg', 'この端末に保存できませんでした。', 'err'); return; }
+  if (el) { el.value = ''; }
+  showMsg('setKeyMsg', '保存しました。一覧を読み直します。', 'ok');
+  reloadFromServer();
+}
+
+/** 合言葉をこの端末から消す */
+function onClearAdminKey() {
+  setAdminKey('');
+  var el = $('setKeyInput');
+  if (el) { el.value = ''; }
+  showMsg('setKeyMsg', 'この端末から消しました。', 'ok');
+}
+
+/** 窓口が生きているかを確かめる（ping） */
+function onPing() {
+  if (isBusy()) { return; }
+  hideMsg('pingMsg');
+  callGas('ping', {}, '窓口に問い合わせています…').then(function (res) {
+    var box = $('pingResult');
+    if (!res.ok) {
+      if (box) { box.hidden = true; }
+      showMsg('pingMsg', String(res.error || '窓口から返事がありませんでした。'), 'err');
+      return;
+    }
+    var rows = [
+      ['窓口の版', String(res.version || '—'), ''],
+      ['台帳の件数', String(res.rows == null ? '—' : res.rows) + ' 件', ''],
+      ['サーバーの時刻', String(res.serverTimeJst || '—'), ''],
+      ['合言葉の設定', res.adminKeySet ? '済み' : 'まだ（窓口側の設定が要ります）', ''],
+      ['メールの差出人', String(res.senderInUse || '—'), ''],
+      ['今日あと送れるメール', String(res.mailRemainingToday == null ? '—' : res.mailRemainingToday) + ' 通', '']
+    ];
+    if (box) {
+      box.innerHTML = dlFromRows(rows);   // dlFromRows が1行ずつ escapeHtml を通す
+      box.hidden = false;
+    }
+    showMsg('pingMsg', '窓口につながりました。', 'ok');
+  }).catch(function (err) {
+    var box = $('pingResult');
+    if (box) { box.hidden = true; }
+    showMsg('pingMsg', errMessage(err, 'つながりませんでした。'), 'err');
+  });
+}
+
+/* ---------------------------------------------------------------------------
+   管理画面 : 相手へメールを送る（窓口の Gmail から送る）
+--------------------------------------------------------------------------- */
+
+/** 送る前に確認モーダルを挟む（メールは取り消せないため） */
+function onSendMail(id, msgElId) {
+  if (isBusy()) { return; }
+  if (!getAdminKey()) { guideToSettings(); return; }
+
+  var c = findContractOrLast(id);
+  if (!c) { toast('契約が見つかりません'); return; }
+  if (!c.partyEmail) {
+    toast('相手先メールアドレスが未登録です');
+    if (msgElId) { showMsg(msgElId, '相手先メールアドレスが登録されていないため送れません。', 'err'); }
+    return;
+  }
+
+  openModal({
+    title: 'この内容でメールを送ります',
+    lines: [
+      '宛先：' + c.partyEmail,
+      '契約名：' + contractTitle(c),
+      '',
+      '※確認コードはメールに書かれていません。電話やチャットで別にお伝えください。'
+    ],
+    okLabel: '送る',
+    onOk: function () { doSendMail(c, msgElId); }
+  });
+}
+
+function doSendMail(c, msgElId) {
+  callGas('sendmail', {
+    key: getAdminKey(),
+    id: c.id,
+    appUrl: appBaseUrl()          // 項目名は appUrl（signUrlBase ではない）
+  }, 'メールを送っています…').then(function (res) {
+    if (!res.ok) {
+      var e = String(res.error || 'メールを送れませんでした。');
+      toast('送れませんでした');
+      if (msgElId) { showMsg(msgElId, e, 'err'); } else { showNetBar(e); }
+      return;
+    }
+    var okText = '送信しました（送信先：' + String(res.to || c.partyEmail) + '）';
+    toast(okText);
+    if (msgElId) { showMsg(msgElId, okText, 'ok'); }
+  }).catch(function (err) {
+    var m = errMessage(err, 'つながりませんでした。ネットワークをご確認ください。');
+    toast('送れませんでした');
+    if (msgElId) { showMsg(msgElId, m, 'err'); } else { showNetBar(m); }
+  });
+}
+
+/* ---------------------------------------------------------------------------
+   管理画面 : 作成タブ
+--------------------------------------------------------------------------- */
+
+var draftType = 'gyomu';    // いま選ばれている契約の種類
+var lastCreatedId = '';     // 直前に作成した契約ID（文字列）
+var lastCreated = null;     // 直前に作成した契約そのもの（id / code / token を持つ）
+var titleTouched = false;   // 契約名を手で触ったか（触っていなければ既定値を追随させる）
+
+function currentFeeType() {
+  var el = $('fFeeType');
+  var v = el ? String(el.value) : 'lump';
+  return (FEE_TYPES.indexOf(v) === -1) ? 'lump' : v;
+}
+
+function setDraftType(key) {
+  if (!CONTRACT_TYPES[key]) { return; }
+  draftType = key;
+  var chips = document.querySelectorAll('#typeChips .chip');
+  for (var i = 0; i < chips.length; i++) {
+    var on = chips[i].getAttribute('data-type') === key;
+    chips[i].classList.toggle('is-active', on);
+  }
+  // NDA は金額欄を出さない
+  var amountField = $('fieldAmount');
+  if (amountField) { amountField.hidden = !CONTRACT_TYPES[key].needsAmount; }
+  // 報酬の形は業務委託契約書のときだけ
+  var feeField = $('fieldFeeType');
+  if (feeField) { feeField.hidden = (key !== 'gyomu'); }
+  refreshAmountLabel();
+  refreshDefaultTitle();
+  // 種類が変わったら前のプレビュー/結果は消す
+  hidePreviewAndResult();
+}
+
+/** 金額欄の見出しを、種類と報酬の形に合わせて書き換える */
+function refreshAmountLabel() {
+  var el = $('amountLabelText');
+  if (!el) { return; }
+  el.textContent = amountLabelFor(draftType, currentFeeType());  // textContent
+}
+
+/** 契約名を手で触っていない間は「種類_相手先名」を入れ続ける */
+function refreshDefaultTitle() {
+  if (titleTouched) { return; }
+  var t = $('fTitle');
+  var p = $('fPartyName');
+  if (!t) { return; }
+  var name = p ? String(p.value).trim() : '';
+  t.value = name ? defaultTitleFor(draftType, name) : '';
+}
+
+function hidePreviewAndResult() {
+  var pv = $('previewCard');
+  var rs = $('resultCard');
+  if (pv) { pv.hidden = true; }
+  if (rs) { rs.hidden = true; }
+}
+
+/** 入力欄の値をまとめて読む */
+function readForm() {
+  var needsAmount = CONTRACT_TYPES[draftType].needsAmount;
+  return {
+    type: draftType,
+    title: ($('fTitle') ? $('fTitle').value : '').trim(),
+    partyName: ($('fPartyName') ? $('fPartyName').value : '').trim(),
+    partyEmail: ($('fPartyEmail') ? $('fPartyEmail').value : '').trim(),
+    workDesc: ($('fWork') ? $('fWork').value : '').trim(),
+    feeType: (draftType === 'gyomu') ? currentFeeType() : 'lump',
+    amount: needsAmount ? ($('fAmount') ? $('fAmount').value : '') : '',
+    startDate: ($('fStart') ? $('fStart').value : ''),
+    endDate: ($('fEnd') ? $('fEnd').value : ''),
+    deadline: ($('fDeadline') ? $('fDeadline').value : ''),
+    note: ($('fNote') ? $('fNote').value : '').trim()
+  };
+}
+
+/** 入力チェック。問題があれば文字列を返す */
+function validateForm(f) {
+  if (!f.partyName) { return '相手先名を入力してください'; }
+  if (!f.title) { return '契約名を入力してください'; }
+  if (!f.workDesc) { return '業務内容を入力してください'; }
+  if (CONTRACT_TYPES[f.type].needsAmount) {
+    if (f.amount === '' || f.amount === null) { return '金額を入力してください'; }
+    var n = Number(f.amount);
+    if (!isFinite(n) || n < 0) { return '金額は0以上の数字で入力してください'; }
+  }
+  if (f.startDate && f.endDate && f.startDate > f.endDate) {
+    return '契約期間の開始日と終了日が逆になっています';
+  }
+  return '';
+}
+
+function onPreview() {
+  var f = readForm();
+  var err = validateForm(f);
+  if (err) { toast(err); return; }
+  var body = buildContractText(f);
+  var doc = $('previewDoc');
+  if (doc) {
+    doc.innerHTML = escapeHtml(body);   // 利用者の入力を含むので必ずエスケープ
+  }
+  var pv = $('previewCard');
+  if (pv) { pv.hidden = false; }
+  var rs = $('resultCard');
+  if (rs) { rs.hidden = true; }
+  if (pv && pv.scrollIntoView) { pv.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+}
+
+function onCreate() {
+  if (isBusy()) { return; }
+  if (!getAdminKey()) { guideToSettings(); return; }
+
+  var f = readForm();
+  var err = validateForm(f);
+  if (err) { toast(err); return; }
+
+  /* 契約ID・確認コード・閲覧トークンは窓口（サーバー）が発行する。
+     画面側で作らない（台帳と食い違わないようにするため）。 */
+  var draft = {
+    type: f.type,
+    title: f.title,
+    partyName: f.partyName,
+    partyEmail: f.partyEmail,
+    workDesc: f.workDesc,
+    feeType: f.feeType,
+    amount: f.amount,
+    startDate: f.startDate,
+    endDate: f.endDate,
+    deadline: f.deadline || ymdPlusDays(14),
+    note: f.note
+  };
+
+  /* 契約書の文面を作るのは今までどおり画面側の役目。
+     作った本文をそのまま窓口へ渡し、台帳に固定して保存してもらう。
+     後から雛形を直しても、相手が読んだ本文と指紋がずれないようにするため。 */
+  var body = buildContractText(draft);
+
+  callGas('create', {
+    key: getAdminKey(),
+    type: draft.type,
+    title: draft.title,
+    partyName: draft.partyName,
+    partyEmail: draft.partyEmail,
+    workDesc: draft.workDesc,
+    feeType: draft.feeType,
+    amount: draft.amount,
+    startDate: draft.startDate,
+    endDate: draft.endDate,
+    deadline: draft.deadline,
+    note: draft.note,
+    body: body
+  }, '契約を作成しています…').then(function (res) {
+    if (!res.ok) {
+      var e = String(res.error || '契約を作成できませんでした。');
+      toast(e);
+      showNetBar(e);
+      return;
+    }
+
+    /* 戻ってきた id / code / token はトップレベルに入っている */
+    var contract = fromGasContract({
+      id: res.id,
+      code: res.code,
+      token: res.token,
+      type: draft.type,
+      title: draft.title,
+      partyName: draft.partyName,
+      partyEmail: draft.partyEmail,
+      workDesc: draft.workDesc,
+      feeType: draft.feeType,
+      amount: draft.amount,
+      startDate: draft.startDate,
+      endDate: draft.endDate,
+      deadline: draft.deadline,
+      note: draft.note,
+      body: body,
+      status: STATUS.PENDING,
+      createdAt: res.createdAt,
+      createdAtJst: res.createdAtJst
+    });
+
+    lastCreated = contract;
+    lastCreatedId = contract.id;
+    hideNetBar();
+    showResult(contract);
+    toast('契約を作成しました');
+    return reloadFromServer();
+  }).catch(function (err) {
+    var m = errMessage(err, 'つながりませんでした。ネットワークをご確認ください。');
+    toast('作成できませんでした');
+    showNetBar(m);
+  });
+}
+
+function showResult(contract) {
+  var url = signUrlFor(contract.id, contract.token);
+  var urlEl = $('resultUrl');
+  var codeEl = $('resultCode');
+  if (urlEl) { urlEl.innerHTML = escapeHtml(url); }
+  if (codeEl) { codeEl.innerHTML = escapeHtml(contract.code); }
+
+  var fbUrl = $('resultUrlFallback');
+  var fbCode = $('resultCodeFallback');
+  if (fbUrl) { fbUrl.hidden = true; fbUrl.value = url; }
+  if (fbCode) { fbCode.hidden = true; fbCode.value = contract.code; }
+
+  var mailEl = $('resultMail');
+  if (mailEl) { mailEl.value = buildMailText(contract); }   // textarea.value なので HTML は解釈されない
+  var fbMail = $('resultMailFallback');
+  if (fbMail) { fbMail.hidden = true; fbMail.value = buildMailText(contract); }
+
+  /* メール送信ボタン。相手先メールが無いときは押せないようにする */
+  hideMsg('sendMailMsg');
+  var sendBtn = $('btnSendMail');
+  if (sendBtn) { sendBtn.disabled = !contract.partyEmail; }
+  if (!contract.partyEmail) {
+    showMsg('sendMailMsg', '相手先メールアドレスが未登録のため、このボタンからは送れません。', 'err');
+  }
+
+  var rs = $('resultCard');
+  if (rs) {
+    rs.hidden = false;
+    if (rs.scrollIntoView) { rs.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   管理画面 : 一覧タブ
+--------------------------------------------------------------------------- */
+
+var openCardIds = {};   // アコーディオンの開閉状態（契約IDは文字列キー）
+
+function setFilter(key) {
+  if (FILTER_LIST.indexOf(key) === -1) { return; }
+  var y = window.scrollY;          // フィルター操作でスクロール位置が飛ばないように保存
+  state.ui.filter = key;
+  saveState();
+  renderList();
+  window.scrollTo(0, y);           // 復元
+}
+
+function filteredContracts() {
+  var f = state.ui.filter;
+  if (f === 'all') { return state.contracts.slice(); }
+  return state.contracts.filter(function (c) { return c.status === f; });
+}
+
+function renderList() {
+  // フィルターボタンの見た目
+  var btns = document.querySelectorAll('#listFilters .filterbtn');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].classList.toggle('is-active', btns[i].getAttribute('data-filter') === state.ui.filter);
+  }
+
+  var box = $('listBody');
+  if (!box) { return; }
+
+  var items = filteredContracts();
+  if (items.length === 0) {
+    box.innerHTML =
+      '<div class="empty">' +
+        '<span class="empty__ico">📄</span>' +
+        '<strong>' + escapeHtml(state.ui.filter === 'all' ? 'まだ契約がありません' : '該当する契約がありません') + '</strong>' +
+        '<p style="margin-top:8px;">「作成」タブから契約を作れます。</p>' +
+      '</div>';
+    return;
+  }
+
+  var html = '';
+  for (var j = 0; j < items.length; j++) {
+    html += cardHtml(items[j]);
+  }
+  box.innerHTML = html;
+}
+
+function cardHtml(c) {
+  var isOpen = !!openCardIds[String(c.id)];
+  var signed = c.status === STATUS.SIGNED;
+  var declined = c.status === STATUS.DECLINED;
+  var badgeClass = signed ? 'badge--signed' : (declined ? 'badge--declined' : 'badge--pending');
+  var amountText = CONTRACT_TYPES[c.type] && CONTRACT_TYPES[c.type].needsAmount
+    ? ('¥' + formatAmount(c.amount) + (c.type === 'gyomu' ? '（' + feeTypeLabel(c.feeType) + '）' : ''))
+    : '金額なし';
+  var meta = typeLabel(c.type) + '　/　' + amountText + '　/　' + formatCreatedAt(c.createdAt);
+
+  var out = '';
+  out += '<article class="clcard' + (isOpen ? ' is-open' : '') + '" data-card-id="' + escapeHtml(c.id) + '">';
+  out +=   '<button class="clcard__head" type="button" data-action="toggle" data-id="' + escapeHtml(c.id) + '">';
+  out +=     '<span class="clcard__main">';
+  out +=       '<span class="clcard__name">' + escapeHtml(contractTitle(c)) + '</span>';
+  out +=       '<span class="clcard__meta">' + escapeHtml(meta) + '</span>';
+  out +=     '</span>';
+  out +=     '<span class="clcard__right">';
+  out +=       '<span class="badge ' + badgeClass + '">' + escapeHtml(statusLabel(c.status)) + '</span>';
+  out +=       '<span class="clcard__caret">▼</span>';
+  out +=     '</span>';
+  out +=   '</button>';
+
+  out +=   '<div class="clcard__body"' + (isOpen ? '' : ' hidden') + '>';
+  out +=     '<div class="dl">';
+  out +=       dlRow('契約番号', escapeHtml(c.id), 'dl__v--mono');
+  out +=       dlRow('相手先', escapeHtml(c.partyName), '');
+  out +=       dlRow('相手先メール', escapeHtml(c.partyEmail || '（未登録）'), '');
+  out +=       dlRow('契約期間', escapeHtml(formatDate(c.startDate) + ' 〜 ' + formatDate(c.endDate)), '');
+  out +=       dlRow('完了期限', escapeHtml(c.deadline ? formatDate(c.deadline) : '（未設定）'), '');
+  out +=       dlRow('開封', escapeHtml(c.openedAt ? (c.openedAtJst || toJst(c.openedAt)) : '未開封'), '');
+  out +=     '</div>';
+
+  if (!signed && !declined) {
+    out +=   '<div class="bigfield" style="margin-top:12px;">';
+    out +=     '<div class="bigfield__label">署名用URL</div>';
+    out +=     '<div class="bigfield__val">' + escapeHtml(signUrlFor(c.id, c.token)) + '</div>';
+    out +=     '<div class="btn-row" style="margin-top:12px;">';
+    out +=       '<button class="btn btn--sm" type="button" data-action="copy-url" data-id="' + escapeHtml(c.id) + '">URLをコピー</button>';
+    out +=     '</div>';
+    out +=   '</div>';
+
+    out +=   '<div class="bigfield">';
+    out +=     '<div class="bigfield__label">本人確認用 4桁コード</div>';
+    out +=     '<div class="bigfield__code">' + escapeHtml(c.code) + '</div>';
+    out +=     '<div class="btn-row" style="margin-top:12px;">';
+    out +=       '<button class="btn btn--sm" type="button" data-action="copy-code" data-id="' + escapeHtml(c.id) + '">コードをコピー</button>';
+    out +=     '</div>';
+    out +=   '</div>';
+
+    out +=   '<h3 class="sec-title" style="margin-top:16px;">メール文案</h3>';
+    out +=   '<textarea class="mailtext" readonly>' + escapeHtml(buildMailText(c)) + '</textarea>';
+    out +=   '<div class="btn-row" style="margin-top:12px;">';
+    out +=     '<button class="btn btn--sm" type="button" data-action="copy-mail" data-id="' + escapeHtml(c.id) + '">メール文案をコピー</button>';
+    out +=   '</div>';
+    out +=   '<div class="field__hint" style="margin-top:8px;">' +
+               '※確認コードは電話やチャットなど別の経路でお伝えするとより安全です。' +
+             '</div>';
+
+    if (c.partyEmail) {
+      out += '<div class="btn-row" style="margin-top:16px;">';
+      out +=   '<button class="btn btn--primary btn--block" type="button" data-action="sendmail" data-id="' + escapeHtml(c.id) + '">この内容でメールを送る</button>';
+      out += '</div>';
+      out += '<div class="field__hint" style="margin-top:8px;">' +
+               '※確認コードはメールに書かれていません。電話やチャットで別にお伝えください。' +
+             '</div>';
+    } else {
+      out += '<div class="field__hint" style="margin-top:8px;">' +
+               '相手先メールアドレスが未登録のため、メールは送れません。' +
+             '</div>';
+    }
+
+    out +=   '<div class="notice" style="margin-top:16px;margin-bottom:0;">' +
+               'まだ締結されていません。URLと4桁コードを相手にお渡しください。' +
+             '</div>';
+  } else {
+    out += '<h3 class="sec-title" style="margin-top:16px;">' +
+             escapeHtml(declined ? '辞退の記録' : '締結の記録') + '</h3>';
+    out += certHtml(c);
+    out += '<div class="btn-row" style="margin-top:16px;">';
+    out +=   '<button class="btn btn--primary btn--block" type="button" data-action="print" data-id="' + escapeHtml(c.id) + '">契約書を印刷 / PDF保存</button>';
+    out += '</div>';
+  }
+
+  out +=   '</div>';
+  out += '</article>';
+  return out;
+}
+
+/** 定義リストの1行。value は呼び出し側でエスケープ済みのHTMLを渡すこと */
+function dlRow(key, valueHtmlAlreadyEscaped, extraClass) {
+  return '<div class="dl__row">' +
+           '<div class="dl__k">' + escapeHtml(key) + '</div>' +
+           '<div class="dl__v ' + escapeHtml(extraClass || '') + '">' + valueHtmlAlreadyEscaped + '</div>' +
+         '</div>';
+}
+
+/* ---------------------------------------------------------------------------
+   電子契約 締結証明書
+   ---------------------------------------------------------------------------
+   先行製品の「完了証明書」に合わせた4ブロック構成。
+     (1) ヘッダ部（契約番号・ステータス・契約名・タイムゾーン・契約作成者）
+     (2) 署名者イベント（名前・メール・署名画像・送信/開封/署名の3時刻・セキュリティレベル）
+     (3) 契約概要イベント表
+     (4) 注記（持っていないものを持っているように書かない）
+   画面用と印刷用で同じ certData() を使うので、中身がずれない。
+--------------------------------------------------------------------------- */
+
+/** 一覧バッジ用のラベル */
+function statusLabel(st) {
+  if (st === STATUS.SIGNED) { return '締結済み'; }
+  if (st === STATUS.DECLINED) { return '辞退'; }
+  return '送信待ち';
+}
+
+/** 証明書のステータス欄。完了／辞退 */
+function certStatusLabel(st) {
+  if (st === STATUS.DECLINED) { return '辞退'; }
+  if (st === STATUS.SIGNED) { return '完了'; }
+  return '未完了';
+}
+
+/** 証明書に載せる中身を組み立てる。値はすべてプレーンテキスト（描画側でエスケープする） */
+function certData(c) {
+  var r = c.record || {};
+  var d = c.decline || {};
+  var declined = c.status === STATUS.DECLINED;
+  var ev = declined ? d : r;      // 署名者イベントの中身は締結か辞退のどちらかに入っている
+
+  var hashText = ev.docHash ? groupHash(ev.docHash) : 'この環境では SHA-256 を計算できませんでした';
+  var hashAlgo = ev.hashAlgo || 'SHA-256（計算できず）';
+  var lastJst = declined ? (d.declinedAtJst || '—') : (r.agreedAtJst || '—');
+  /* 日時はサーバー（窓口）が付けたものを優先する。相手の端末の時計は信用しない。
+     署名画面では作成日時が返ってこないので、その場合は「—」と正直に出す。 */
+  var opened = !!(c.openedAtJst || c.openedAt);
+  var openedJst = c.openedAtJst || (c.openedAt ? toJst(c.openedAt) : '');
+  var sentJst = c.createdAtJst || (c.createdAt ? toJst(c.createdAt) : '') || '—';
+
+  var header = [
+    ['契約番号', String(c.id), 'mono'],
+    ['ステータス', certStatusLabel(c.status), ''],
+    ['契約名', contractTitle(c), ''],
+    ['契約の種類', typeLabel(c.type), ''],
+    ['タイムゾーン', '日本標準時（JST / Asia/Tokyo）', ''],
+    ['契約作成者名', CREATOR_NAME, ''],
+    ['契約作成者メールアドレス', CREATOR_EMAIL, ''],
+    ['文書の指紋（SHA-256）', hashText, 'mono'],
+    ['指紋の方式', hashAlgo, '']
+  ];
+
+  var signer = [
+    ['名前', (ev.signerName || c.partyName || '—'), ''],
+    ['メールアドレス', (c.partyEmail || '—'), ''],
+    ['タイムスタンプ：送信', sentJst, ''],
+    ['タイムスタンプ：開封', (openedJst || '未開封'), ''],
+    ['タイムスタンプ：' + (declined ? '辞退' : '署名'), lastJst, ''],
+    ['セキュリティレベル', SECURITY_LEVEL, ''],
+    ['確認コード 照合日時', (ev.codeVerifiedAtJst || '—'), ''],
+    ['署名の作り方', (ev.signatureMode === 'hand' ? '手書き' : (ev.signatureMode === 'auto' ? '氏名から自動生成' : '—')), ''],
+    ['ブラウザ情報', (ev.userAgent || '—'), 'mono'],
+    ['画面サイズ', (ev.screen || '—'), ''],
+    ['ブラウザのタイムゾーン', (ev.timezone || '—'), ''],
+    /* IPアドレスは窓口（Google Apps Script）が受け取れない。
+       サーバーが書いた文言をそのまま出す（嘘の値は入れない）。 */
+    ['使用IPアドレス', (ev.ipAddress || '取得不可（サーバー側で発信元IPを受け取れません）'), 'muted']
+  ];
+  if (declined) {
+    signer.push(['辞退コメント', (d.comment || '（コメントなし）'), '']);
+  }
+
+  var events = [
+    ['契約の送信', '完了', sentJst],
+    ['契約の開封', (opened ? '完了' : '未開封'), (openedJst || '—')],
+    ['署名', (declined ? '辞退' : (c.status === STATUS.SIGNED ? '完了' : '未署名')), lastJst]
+  ];
+
+  var notes = [
+    '本証明書は、' + COMPANY_NAME + 'が自社で運用する仕組みにより記録したものです。',
+    '第三者機関による認定タイムスタンプは付与されていません。',
+    '文書の同一性は、上記の文書の指紋（SHA-256）により確認できます。本文が1文字でも変わると指紋は全く別の値になります。'
+  ];
+
+  return {
+    header: header,
+    signer: signer,
+    events: events,
+    notes: notes,
+    signatureImage: (ev.signatureImage || ''),
+    declined: declined
+  };
+}
+
+/** 画面用: 定義リスト（行の値は必ずここでエスケープする） */
+function dlFromRows(rows) {
+  var out = '<div class="dl">';
+  for (var i = 0; i < rows.length; i++) {
+    var kind = rows[i][2];
+    var cls = (kind === 'mono') ? 'dl__v--mono' : ((kind === 'muted') ? 'dl__v--pending' : '');
+    out += dlRow(rows[i][0], escapeHtml(rows[i][1]), cls);
+  }
+  out += '</div>';
+  return out;
+}
+
+/** 画面用の締結証明書（4ブロック） */
+function certHtml(c) {
+  var data = certData(c);
+  var i;
+  var out = '<div class="cert">';
+
+  /* (1) ヘッダ部 */
+  out += '<section class="cert__block">';
+  out +=   '<h3 class="cert__h">(1) 電子契約 締結証明書</h3>';
+  out +=   dlFromRows(data.header);
+  out += '</section>';
+
+  /* (2) 署名者イベント */
+  out += '<section class="cert__block">';
+  out +=   '<h3 class="cert__h">(2) 署名者イベント</h3>';
+  out +=   dlFromRows(data.signer);
+  var sigSrc = safeImageSrc(data.signatureImage);
+  if (sigSrc) {
+    out += '<div class="sigthumb" style="margin-top:12px;">' +
+             '<img src="' + sigSrc + '" alt="署名">' +
+           '</div>';
+  }
+  out += '</section>';
+
+  /* (3) 契約概要イベント */
+  out += '<section class="cert__block">';
+  out +=   '<h3 class="cert__h">(3) 契約概要イベント</h3>';
+  out +=   '<table class="evt">';
+  out +=     '<tr><th>イベント</th><th>ステータス</th><th>日時</th></tr>';
+  for (i = 0; i < data.events.length; i++) {
+    out +=   '<tr>' +
+               '<td>' + escapeHtml(data.events[i][0]) + '</td>' +
+               '<td>' + escapeHtml(data.events[i][1]) + '</td>' +
+               '<td>' + escapeHtml(data.events[i][2]) + '</td>' +
+             '</tr>';
+  }
+  out +=   '</table>';
+  out += '</section>';
+
+  /* (4) 注記 */
+  out += '<section class="cert__block">';
+  out +=   '<h3 class="cert__h">(4) 注記</h3>';
+  out +=   '<div class="cert__note">';
+  for (i = 0; i < data.notes.length; i++) {
+    if (i === 1) {
+      out += '<div>・<strong>' + escapeHtml(data.notes[i]) + '</strong></div>';
+    } else {
+      out += '<div>・' + escapeHtml(data.notes[i]) + '</div>';
+    }
+  }
+  out +=   '</div>';
+  out += '</section>';
+
+  out += '</div>';
+  return out;
+}
+
+/* ---------------------------------------------------------------------------
+   印刷（PDF保存）: #printArea に本文＋証明書を組み立てて window.print()
+--------------------------------------------------------------------------- */
+
+function printContract(id) {
+  /* 管理画面なら一覧から、署名画面なら開いている契約から取る */
+  var c = findContractOrLast(id);
+  if (!c && signCtx.contract && String(signCtx.contract.id) === String(id)) { c = signCtx.contract; }
+  if (!c) { toast('契約が見つかりません'); return; }
+  var area = $('printArea');
+  if (!area) { return; }
+  area.innerHTML = printHtml(c);
+  // 描画が終わってから印刷ダイアログを開く
+  setTimeout(function () { window.print(); }, 60);
+}
+
+function printHtml(c) {
+  var data = certData(c);
+  var i;
+  var out = '';
+
+  /* --- 1ページ目以降: 契約書本文 --- */
+  out += '<div class="pr-doc">' + escapeHtml(c.body || buildContractText(c)) + '</div>';
+
+  /* --- 最終ページ: 電子契約 締結証明書（画面と同じ4ブロック） --- */
+  out += '<section class="pr-cert">';
+  out +=   '<h1 class="pr-cert__title">電子契約 締結証明書</h1>';
+  out +=   '<p class="pr-cert__lead">' +
+             '本書は、前記の契約書について電子的な方法により意思表示がなされたことを示す記録です。' +
+             '（発行：' + escapeHtml(COMPANY_NAME) + ' ／ DP Sign v0.3）' +
+           '</p>';
+
+  /* (1) ヘッダ部 */
+  out +=   '<h2 class="pr-sec">(1) 電子契約 締結証明書</h2>';
+  out +=   '<table class="pr-tbl">';
+  out +=     prRowsFrom(data.header);
+  out +=   '</table>';
+
+  /* (2) 署名者イベント */
+  out +=   '<h2 class="pr-sec">(2) 署名者イベント</h2>';
+  out +=   '<table class="pr-tbl">';
+  out +=     prRowsFrom(data.signer);
+  out +=   '</table>';
+
+  var prSigSrc = safeImageSrc(data.signatureImage);
+  if (prSigSrc) {
+    out += '<div class="pr-sig">' +
+             '<div style="font-size:9.5pt;margin-bottom:4pt;">署名</div>' +
+             '<img src="' + prSigSrc + '" alt="署名">' +
+           '</div>';
+  }
+
+  /* (3) 契約概要イベント */
+  out +=   '<h2 class="pr-sec">(3) 契約概要イベント</h2>';
+  out +=   '<table class="pr-evt">';
+  out +=     '<tr><th>イベント</th><th>ステータス</th><th>日時</th></tr>';
+  for (i = 0; i < data.events.length; i++) {
+    out +=   '<tr>' +
+               '<td>' + escapeHtml(data.events[i][0]) + '</td>' +
+               '<td>' + escapeHtml(data.events[i][1]) + '</td>' +
+               '<td>' + escapeHtml(data.events[i][2]) + '</td>' +
+             '</tr>';
+  }
+  out +=   '</table>';
+
+  /* (4) 注記 */
+  out +=   '<h2 class="pr-sec">(4) 注記</h2>';
+  out +=   '<div class="pr-note">';
+  for (i = 0; i < data.notes.length; i++) {
+    if (i === 1) {
+      out += '<div>・<strong>' + escapeHtml(data.notes[i]) + '</strong></div>';
+    } else {
+      out += '<div>・' + escapeHtml(data.notes[i]) + '</div>';
+    }
+  }
+  out +=   '</div>';
+
+  out += '</section>';
+
+  return out;
+}
+
+/** 印刷用: 1行1行を <tr><th><td> にする（値はここでエスケープする） */
+function prRowsFrom(rows) {
+  var out = '';
+  for (var i = 0; i < rows.length; i++) {
+    var kind = rows[i][2];
+    var v = escapeHtml(rows[i][1]);
+    if (kind === 'mono') { v = '<span class="pr-mono">' + v + '</span>'; }
+    if (kind === 'muted') { v = '<span class="pr-pending">' + v + '</span>'; }
+    out += prRow(rows[i][0], v);
+  }
+  return out;
+}
+
+function prRow(key, valueHtmlAlreadyEscaped) {
+  return '<tr><th>' + escapeHtml(key) + '</th><td>' + valueHtmlAlreadyEscaped + '</td></tr>';
+}
+
+/* ---------------------------------------------------------------------------
+   B. 署名画面
+--------------------------------------------------------------------------- */
+
+var signCtx = {
+  contract: null,
+  id: '',              // 契約ID（文字列のまま。Number にしない）
+  token: '',           // 閲覧トークン（URL の &t=）
+  code: '',            // 照合できた確認コード。締結・辞退のときに一緒に送る
+  codeVerifiedAt: '',
+  hasSignature: false,
+  mode: 'auto',        // 'auto' = 氏名から自動生成（既定） / 'hand' = 手書き
+  canvas: null,
+  ctx: null,
+  cssW: 0,
+  cssH: 0,
+  drawing: false,
+  lastX: 0,
+  lastY: 0,
+  busy: false          // 締結／辞退の二重実行よけ
+};
+
+/* 署名の自動生成に使うフォント。端末にあるものだけを並べる（Webフォントは読み込まない）。
+   ラテン文字は筆記体、日本語は明朝に落ちる。 */
+var SIG_FONT_STACK = '"Snell Roundhand", "Apple Chancery", "Hiragino Mincho ProN", "Yu Mincho", "MS Mincho", serif';
+
+/* ※確認コードを何回間違えたかは窓口（サーバー）が数える。
+     相手のブラウザでは数えない（相手側で消せてしまうため）。 */
+
+/**
+ * 署名画面を開く。
+ * 契約の中身は窓口から取り直す（この端末には何も保存されていない）。
+ * @param {string} docId 契約ID（文字列）
+ * @param {string} token 閲覧トークン（URL の &t=）
+ */
+function initSign(docId, token) {
+  // 変数名に screen を使うと window.screen を隠してしまうので scr にする
+  var scr = $('signScreen');
+  if (scr) { scr.hidden = false; }
+
+  signCtx.id = String(docId || '');
+  signCtx.token = String(token || '');
+
+  if (!signCtx.id || !signCtx.token) {
+    showSignError('このURLでは契約書を開けません。お手数ですが送信元へご連絡ください。');
+    return Promise.resolve();
+  }
+
+  return callGas('get', { id: signCtx.id, t: signCtx.token }, '契約書を読み込んでいます…').then(function (res) {
+    if (!res.ok) {
+      // 窓口からの説明（日本語）をそのまま相手に見せる
+      showSignError(res.error || 'この契約書は開けませんでした。');
+      return null;
+    }
+
+    var c = fromGasContract(res);
+    signCtx.contract = c;
+
+    if (c.status === STATUS.DECLINED && c.decline) {
+      showSignDeclined(c);           // すでに辞退済み。同じ契約は締結できない
+    } else if (c.status === STATUS.SIGNED && c.record) {
+      showSignDone(c);               // すでに締結済み。記録だけを見せる
+    } else {
+      var flow = $('signFlow');
+      if (flow) { flow.hidden = false; }
+
+      var docEl = $('signDoc');
+      if (docEl) {
+        docEl.innerHTML = escapeHtml(c.body || '（本文を読み取れませんでした。お手数ですが送信元へご連絡ください。）');
+      }
+
+      if (c.codeLocked) {
+        lockCodeInput();
+      } else {
+        showAttemptsLeft(c.attemptsLeft);
+      }
+    }
+    return c;
+  }).then(function (c) {
+    if (!c) { return null; }
+    // 開封の記録。失敗しても画面は止めない（覆いも出さない）
+    return callGas('open', { id: c.id, token: signCtx.token }, false).then(function (r) {
+      if (r && r.ok) {
+        c.openedAt = String(r.openedAt || c.openedAt || '');
+        c.openedAtJst = String(r.openedAtJst || c.openedAtJst || '');
+      }
+      return c;
+    }).catch(function (e) {
+      console.error('[initSign] 開封の記録に失敗', e);
+      return c;
+    });
+  }).catch(function (err) {
+    showSignError(errMessage(err, 'つながりませんでした。ネットワークをご確認ください。'));
+  });
+}
+
+/** 開けなかったときの画面。理由は窓口の文言をそのまま出す */
+function showSignError(message) {
+  var flow = $('signFlow');
+  if (flow) { flow.hidden = true; }
+  var el = $('signNotFoundMsg');
+  if (el) { el.textContent = String(message || ''); }   // textContent なので HTML は解釈されない
+  var nf = $('signNotFound');
+  if (nf) { nf.hidden = false; }
+}
+
+/** 「あと◯回」はサーバーが返す attemptsLeft をそのまま出す */
+function showAttemptsLeft(n) {
+  var el = $('codeLeft');
+  if (!el) { return; }
+  if (typeof n !== 'number' || n < 0) { el.hidden = true; return; }
+  el.textContent = '入力できるのは、あと ' + n + ' 回です。';
+  el.hidden = false;
+}
+
+/** コード入力を閉じる。文言は窓口が返したものを優先する */
+function lockCodeInput(message) {
+  var input = $('codeInput');
+  var btn = $('btnVerifyCode');
+  if (input) { input.disabled = true; }
+  if (btn) { btn.disabled = true; }
+  showAttemptsLeft(0);
+  showMsg('codeMsg', message || 'コードの入力を規定の回数だけ間違えたため、この画面はロックされています。お手数ですが当社までご連絡ください。', 'err');
+}
+
+function showMsg(elId, text, kind) {
+  var el = $(elId);
+  if (!el) { return; }
+  el.textContent = String(text);      // textContent なので HTML は解釈されない
+  el.classList.toggle('msg--err', kind === 'err');
+  el.classList.toggle('msg--ok', kind === 'ok');
+  el.hidden = false;
+}
+
+function hideMsg(elId) {
+  var el = $(elId);
+  if (el) { el.hidden = true; }
+}
+
+function onVerifyCode() {
+  var c = signCtx.contract;
+  if (!c || isBusy()) { return; }
+  if (c.codeLocked) { lockCodeInput(); return; }
+
+  var input = $('codeInput');
+  var entered = input ? String(input.value).trim() : '';
+
+  if (!/^\d{4}$/.test(entered)) {
+    showMsg('codeMsg', '4桁の数字を入力してください', 'err');
+    return;
+  }
+
+  hideMsg('codeMsg');
+
+  /* 照合するのは窓口（サーバー）。合っているかも、あと何回かも、向こうが持っている */
+  callGas('verify', {
+    id: c.id,
+    token: signCtx.token,
+    code: entered
+  }, '確認しています…').then(function (res) {
+
+    if (typeof res.attemptsLeft === 'number') {
+      c.attemptsLeft = res.attemptsLeft;
+      showAttemptsLeft(res.attemptsLeft);
+    }
+
+    if (res.ok) {
+      signCtx.codeVerifiedAt = String(res.verifiedAt || '');
+      signCtx.codeVerifiedAtJst = String(res.verifiedAtJst || '');
+      signCtx.code = entered;
+      showAttemptsLeft(null);
+      showMsg('codeMsg', '確認できました', 'ok');
+      if (input) { input.disabled = true; }
+      var vbtn = $('btnVerifyCode');
+      if (vbtn) { vbtn.disabled = true; }
+
+      var stepSign = $('stepSign');
+      if (stepSign) {
+        stepSign.hidden = false;
+        setupSignatureCanvas();
+        setSigMode('auto');      // 既定は氏名からの自動生成
+        if (stepSign.scrollIntoView) { stepSign.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      }
+      return;
+    }
+
+    if (res.locked) {
+      c.codeLocked = true;
+      lockCodeInput(res.error);
+      return;
+    }
+    showMsg('codeMsg', String(res.error || 'コードが一致しません'), 'err');
+
+  }).catch(function (err) {
+    showMsg('codeMsg', errMessage(err, 'つながりませんでした。ネットワークをご確認ください。'), 'err');
+  });
+}
+
+/* ---- 手書きサイン（canvas。マウス・タッチ両対応） ---- */
+
+function setupSignatureCanvas() {
+  var canvas = $('sigCanvas');
+  if (!canvas || signCtx.canvas) { return; }   // 二重初期化しない
+
+  var ratio = window.devicePixelRatio || 1;
+  var rect = canvas.getBoundingClientRect();
+  var w = rect.width || canvas.clientWidth || 300;
+  var h = rect.height || 180;
+
+  canvas.width = Math.round(w * ratio);
+  canvas.height = Math.round(h * ratio);
+
+  var ctx = canvas.getContext('2d');
+  ctx.scale(ratio, ratio);
+  ctx.lineWidth = 2.2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = '#14213d';
+
+  signCtx.canvas = canvas;
+  signCtx.ctx = ctx;
+  signCtx.cssW = w;
+  signCtx.cssH = h;
+  signCtx.hasSignature = false;
+
+  canvas.addEventListener('mousedown', onDrawStart);
+  canvas.addEventListener('mousemove', onDrawMove);
+  window.addEventListener('mouseup', onDrawEnd);
+  canvas.addEventListener('mouseleave', onDrawEnd);
+
+  canvas.addEventListener('touchstart', onDrawStart, { passive: false });
+  canvas.addEventListener('touchmove', onDrawMove, { passive: false });
+  canvas.addEventListener('touchend', onDrawEnd);
+  canvas.addEventListener('touchcancel', onDrawEnd);
+}
+
+function pointOf(e) {
+  var canvas = signCtx.canvas;
+  var rect = canvas.getBoundingClientRect();
+  var src = e;
+  if (e.touches && e.touches.length > 0) { src = e.touches[0]; }
+  else if (e.changedTouches && e.changedTouches.length > 0) { src = e.changedTouches[0]; }
+  return { x: src.clientX - rect.left, y: src.clientY - rect.top };
+}
+
+function onDrawStart(e) {
+  if (!signCtx.ctx) { return; }
+  if (signCtx.mode !== 'hand') { return; }   // 自動生成モードでは描かせない
+  if (e.cancelable) { e.preventDefault(); }
+  var p = pointOf(e);
+  signCtx.drawing = true;
+  signCtx.lastX = p.x;
+  signCtx.lastY = p.y;
+  // 点だけ打ったときも線が残るように 1 ドット描く
+  signCtx.ctx.beginPath();
+  signCtx.ctx.moveTo(p.x, p.y);
+  signCtx.ctx.lineTo(p.x + 0.1, p.y + 0.1);
+  signCtx.ctx.stroke();
+  markSigned();
+}
+
+function onDrawMove(e) {
+  if (!signCtx.drawing || !signCtx.ctx) { return; }
+  if (signCtx.mode !== 'hand') { return; }
+  if (e.cancelable) { e.preventDefault(); }
+  var p = pointOf(e);
+  signCtx.ctx.beginPath();
+  signCtx.ctx.moveTo(signCtx.lastX, signCtx.lastY);
+  signCtx.ctx.lineTo(p.x, p.y);
+  signCtx.ctx.stroke();
+  signCtx.lastX = p.x;
+  signCtx.lastY = p.y;
+  markSigned();
+}
+
+function onDrawEnd() {
+  signCtx.drawing = false;
+}
+
+function markSigned() {
+  if (!signCtx.hasSignature) {
+    signCtx.hasSignature = true;
+    var ph = $('sigPlaceholder');
+    if (ph) { ph.hidden = true; }
+  }
+  updateSignButton();
+}
+
+/** 氏名を打ち直したとき: 自動生成モードなら署名を作り直す */
+function onSignerNameInput() {
+  if (signCtx.mode === 'auto') { renderAutoSignature(); }
+  updateSignButton();
+}
+
+/** キャンバスを白紙に戻す（モードは変えない） */
+function clearCanvas() {
+  if (!signCtx.ctx || !signCtx.canvas) { return; }
+  var ratio = window.devicePixelRatio || 1;
+  signCtx.ctx.clearRect(0, 0, signCtx.canvas.width / ratio, signCtx.canvas.height / ratio);
+}
+
+/** 手書きモードでの「書き直す」 */
+function clearSignature() {
+  clearCanvas();
+  signCtx.hasSignature = false;
+  var ph = $('sigPlaceholder');
+  if (ph && signCtx.mode === 'hand') { ph.hidden = false; }
+  updateSignButton();
+}
+
+/** 氏名から署名を自動で描く（既定）。何も描かなくても締結できるようにするため */
+function renderAutoSignature() {
+  if (signCtx.mode !== 'auto') { return; }
+  if (!signCtx.ctx || !signCtx.canvas) { return; }
+
+  var nameEl = $('signerName');
+  var name = nameEl ? String(nameEl.value).trim() : '';
+
+  clearCanvas();
+  signCtx.hasSignature = false;
+  if (!name) { updateSignButton(); return; }
+
+  var ctx = signCtx.ctx;
+  var w = signCtx.cssW || 300;
+  var h = signCtx.cssH || 180;
+  var maxW = w - 40;
+  var size = 56;
+
+  ctx.save();
+  ctx.fillStyle = '#14213d';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = size + 'px ' + SIG_FONT_STACK;
+  while (size > 14 && ctx.measureText(name).width > maxW) {
+    size -= 2;
+    ctx.font = size + 'px ' + SIG_FONT_STACK;
+  }
+  ctx.fillText(name, w / 2, h / 2 - 6);
+  ctx.restore();
+
+  signCtx.hasSignature = true;
+  updateSignButton();
+}
+
+/** 署名の作り方を切り替える。既定は自動生成、手書きは切り替えたときだけ */
+function setSigMode(mode) {
+  signCtx.mode = (mode === 'hand') ? 'hand' : 'auto';
+
+  var modeBtn = $('btnSigMode');
+  var clearBtn = $('btnClearSig');
+  var ph = $('sigPlaceholder');
+  var hint = $('sigModeHint');
+
+  clearCanvas();
+  signCtx.hasSignature = false;
+
+  if (signCtx.mode === 'hand') {
+    if (modeBtn) { modeBtn.textContent = '自動生成に戻す'; }
+    if (clearBtn) { clearBtn.hidden = false; }
+    if (ph) { ph.hidden = false; }
+    if (hint) { hint.textContent = '枠の中に指またはマウスでご署名ください。自動生成に戻すこともできます。'; }
+    updateSignButton();
+  } else {
+    if (modeBtn) { modeBtn.textContent = '手書きで書く'; }
+    if (clearBtn) { clearBtn.hidden = true; }
+    if (ph) { ph.hidden = true; }
+    if (hint) { hint.textContent = 'お名前から署名を自動で作ります。手書きにしたい場合は下のボタンで切り替えてください。'; }
+    renderAutoSignature();
+  }
+}
+
+/* ---- 締結ボタンの活性判定 ---- */
+
+function updateSignButton() {
+  var btn = $('btnSign');
+  if (!btn) { return; }
+  var nameEl = $('signerName');
+  var agreeEl = $('agreeCheck');
+  var nameOk = !!(nameEl && String(nameEl.value).trim());
+  var agreeOk = !!(agreeEl && agreeEl.checked);
+  btn.disabled = !(nameOk && signCtx.hasSignature && agreeOk && signCtx.codeVerifiedAt);
+
+  var line = $('agreeLine');
+  if (line) { line.classList.toggle('is-on', agreeOk); }
+}
+
+/* ---- 共通: 署名者の環境を拾う ---- */
+
+function captureEnv() {
+  var tz = '';
+  try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { tz = ''; }
+  return {
+    userAgent: navigator.userAgent || '',
+    screen: (window.screen ? (window.screen.width + ' × ' + window.screen.height) : '不明') +
+            '（表示領域 ' + window.innerWidth + ' × ' + window.innerHeight + '）',
+    timezone: tz || '不明'
+  };
+}
+
+/* ---- 締結する（確認モーダル → 実行） ---- */
+
+function onSubmitSign() {
+  var c = signCtx.contract;
+  if (!c) { return; }
+  if (signCtx.busy || isBusy()) { return; }
+  if (c.status === STATUS.DECLINED) { showMsg('signMsg', 'この契約はすでに辞退されています。締結はできません。', 'err'); return; }
+  if (!signCtx.codeVerifiedAt) { showMsg('signMsg', '先に4桁コードの確認をお願いします', 'err'); return; }
+
+  var nameEl = $('signerName');
+  var signerName = nameEl ? String(nameEl.value).trim() : '';
+  if (!signerName) { showMsg('signMsg', 'お名前を入力してください', 'err'); return; }
+  if (!signCtx.hasSignature) {
+    showMsg('signMsg', signCtx.mode === 'hand' ? '枠の中にご署名ください' : 'お名前を入力してください', 'err');
+    return;
+  }
+  var agreeEl = $('agreeCheck');
+  if (!agreeEl || !agreeEl.checked) { showMsg('signMsg', '同意のチェックをお願いします', 'err'); return; }
+
+  hideMsg('signMsg');
+
+  openModal({
+    title: '締結してよろしいですか',
+    lines: [
+      '契約名：' + contractTitle(c),
+      '署名者：' + signerName,
+      '',
+      '締結（署名）および辞退の操作は取り消せません。',
+      '辞退した場合、この契約は締結されずに終了します。'
+    ],
+    okLabel: '締結する',
+    onOk: function () { doSign(signerName); }
+  });
+}
+
+function doSign(signerName) {
+  var c = signCtx.contract;
+  if (!c || signCtx.busy) { return; }
+  signCtx.busy = true;
+
+  var btn = $('btnSign');
+  var dbtn = $('btnDecline');
+  if (btn) { btn.disabled = true; }
+  if (dbtn) { dbtn.disabled = true; }
+
+  function unlock() {
+    signCtx.busy = false;
+    if (btn) { btn.disabled = false; }
+    if (dbtn) { dbtn.disabled = false; }
+  }
+
+  var bodyText = c.body || '';
+  var sigImage = '';
+  try {
+    sigImage = signCtx.canvas ? signCtx.canvas.toDataURL('image/png') : '';
+  } catch (e) {
+    console.error('[doSign] サイン画像の取り出しに失敗', e);
+    sigImage = '';
+  }
+
+  /* 締結の時刻を決めるのも、記録を残すのも窓口（サーバー）。
+     相手の端末の時計は信用しない。 */
+  sha256Hex(bodyText).then(function (hex) {
+    var env = captureEnv();
+    return callGas('sign', {
+      id: c.id,
+      token: signCtx.token,
+      code: signCtx.code,
+      signerName: signerName,
+      docHash: hex || '',
+      hashAlgo: hex ? 'SHA-256（16進64文字）' : 'SHA-256（この環境では計算できず）',
+      signatureImage: sigImage,
+      userAgent: env.userAgent,
+      screen: env.screen,
+      timezone: env.timezone,
+      signatureMode: (signCtx.mode === 'hand') ? 'hand' : 'auto'
+    }, '締結を記録しています…');
+  }).then(function (res) {
+    if (!res.ok) {
+      unlock();
+      showMsg('signMsg', String(res.error || '締結できませんでした。'), 'err');
+      return;
+    }
+
+    c.status = STATUS.SIGNED;
+    c.record = (res.record && typeof res.record === 'object') ? res.record : null;
+    /* 台帳では署名画像が Drive に移されることがある（そのときは "drive:…" が返る）。
+       画面に出すぶんは手元の画像を使う。 */
+    if (c.record && String(c.record.signatureImage || '').indexOf('data:image/png;base64,') !== 0) {
+      c.record.signatureImage = sigImage;
+    }
+    signCtx.busy = false;
+
+    var flow = $('signFlow');
+    if (flow) { flow.hidden = true; }
+    showSignDone(c);
+  }).catch(function (err) {
+    console.error('[doSign] 締結処理に失敗', err);
+    unlock();
+    showMsg('signMsg', errMessage(err, '締結処理でエラーが起きました。画面を読み込み直してもう一度お試しください。'), 'err');
+  });
+}
+
+/* ---- 辞退する（［辞退］→ コメント（任意）→［辞退する］） ----
+   送信後に差出人が取り下げる機能は無い。止める手段はこの辞退だけ。 */
+
+function onDecline() {
+  var c = signCtx.contract;
+  if (!c) { return; }
+  if (signCtx.busy || isBusy()) { return; }
+  if (c.status === STATUS.SIGNED) { showMsg('signMsg', 'この契約はすでに締結されています。', 'err'); return; }
+  if (c.status === STATUS.DECLINED) { showMsg('signMsg', 'この契約はすでに辞退されています。', 'err'); return; }
+  if (!signCtx.codeVerifiedAt) { showMsg('signMsg', '先に4桁コードの確認をお願いします', 'err'); return; }
+
+  hideMsg('signMsg');
+
+  openModal({
+    title: 'この契約を辞退します',
+    lines: [
+      '契約名：' + contractTitle(c),
+      '',
+      '締結（署名）および辞退の操作は取り消せません。',
+      '辞退した場合、この契約は締結されずに終了します。',
+      '差し支えなければ、理由をコメントに残してください。'
+    ],
+    withComment: true,
+    okLabel: '辞退する',
+    danger: true,
+    onOk: function (comment) { doDecline(comment); }
+  });
+}
+
+function doDecline(comment) {
+  var c = signCtx.contract;
+  if (!c || signCtx.busy) { return; }
+  signCtx.busy = true;
+
+  var btn = $('btnSign');
+  var dbtn = $('btnDecline');
+  if (btn) { btn.disabled = true; }
+  if (dbtn) { dbtn.disabled = true; }
+
+  function unlock() {
+    signCtx.busy = false;
+    if (btn) { btn.disabled = false; }
+    if (dbtn) { dbtn.disabled = false; }
+  }
+
+  var nameEl = $('signerName');
+  var signerName = nameEl ? String(nameEl.value).trim() : '';
+  var bodyText = c.body || '';
+
+  /* 辞退も記録するのは窓口（サーバー）。
+     指紋・氏名・端末の情報も一緒に送る（窓口はこれらを記録に書き写す）。 */
+  sha256Hex(bodyText).then(function (hex) {
+    var env = captureEnv();
+    return callGas('decline', {
+      id: c.id,
+      token: signCtx.token,
+      code: signCtx.code,
+      comment: String(comment || ''),
+      signerName: signerName,
+      docHash: hex || '',
+      hashAlgo: hex ? 'SHA-256（16進64文字）' : 'SHA-256（この環境では計算できず）',
+      userAgent: env.userAgent,
+      screen: env.screen,
+      timezone: env.timezone
+    }, '辞退を記録しています…');
+  }).then(function (res) {
+    if (!res.ok) {
+      unlock();
+      showMsg('signMsg', String(res.error || '辞退できませんでした。'), 'err');
+      return;
+    }
+
+    c.status = STATUS.DECLINED;
+    c.decline = (res.record && typeof res.record === 'object') ? res.record : null;
+    signCtx.busy = false;
+
+    var flow = $('signFlow');
+    if (flow) { flow.hidden = true; }
+    showSignDeclined(c);
+  }).catch(function (err) {
+    console.error('[doDecline] 辞退処理に失敗', err);
+    unlock();
+    showMsg('signMsg', errMessage(err, '辞退処理でエラーが起きました。画面を読み込み直してもう一度お試しください。'), 'err');
+  });
+}
+
+function showSignDone(c) {
+  var flow = $('signFlow');
+  if (flow) { flow.hidden = true; }
+  var declined = $('signDeclined');
+  if (declined) { declined.hidden = true; }
+  var done = $('signDone');
+  var rec = $('signRecord');
+  if (rec) { rec.innerHTML = certHtml(c); }
+  if (done) {
+    done.hidden = false;
+    if (done.scrollIntoView) { done.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  }
+}
+
+function showSignDeclined(c) {
+  var flow = $('signFlow');
+  if (flow) { flow.hidden = true; }
+  var done = $('signDone');
+  if (done) { done.hidden = true; }
+  var box = $('signDeclined');
+  var rec = $('declineRecord');
+  if (rec) { rec.innerHTML = certHtml(c); }
+  if (box) {
+    box.hidden = false;
+    if (box.scrollIntoView) { box.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   A. 管理画面の初期化とタブ切り替え
+--------------------------------------------------------------------------- */
+
+async function initAdmin() {
+  var hdr = $('adminHeader');
+  var ftr = $('adminFooter');
+  var scr = $('adminScreen');
+  if (hdr) { hdr.hidden = false; }
+  if (ftr) { ftr.hidden = false; }
+  if (scr) { scr.hidden = false; }
+
+  // 完了期限の既定は作成日の14日後
+  var dl = $('fDeadline');
+  if (dl && !dl.value) { dl.value = ymdPlusDays(14); }
+
+  setDraftType(draftType);
+  switchTab(state.ui.tab);
+  renderSettings();
+  renderList();                 // まず控えを出す（通信を待たずに画面が出る）
+
+  await reloadFromServer();     // そのあと正本（窓口）から読み直す
+}
+
+function switchTab(tab) {
+  if (TAB_LIST.indexOf(tab) === -1) { tab = 'create'; }
+  state.ui.tab = tab;
+  saveState();
+
+  var pc = $('panelCreate');
+  var pl = $('panelList');
+  var ps = $('panelSettings');
+  if (pc) { pc.hidden = (tab !== 'create'); }
+  if (pl) { pl.hidden = (tab !== 'list'); }
+  if (ps) { ps.hidden = (tab !== 'settings'); }
+  if (tab === 'settings') { renderSettings(); }
+
+  var btns = document.querySelectorAll('#tabBar .tabbtn');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].classList.toggle('is-active', btns[i].getAttribute('data-tab') === tab);
+  }
+  if (tab === 'list') { renderList(); }
+  window.scrollTo(0, 0);
+}
+
+/** 一覧カードのアコーディオン開閉 */
+function toggleCard(id) {
+  var key = String(id);
+  var y = window.scrollY;
+  openCardIds[key] = !openCardIds[key];
+  renderList();
+  window.scrollTo(0, y);
+}
+
+/* ---------------------------------------------------------------------------
+   イベント登録
+--------------------------------------------------------------------------- */
+
+function bindEvents() {
+
+  /* --- 動的に作り直される要素はイベント委譲で拾う --- */
+  document.addEventListener('click', function (e) {
+
+    // 契約の種類チップ
+    var chip = e.target.closest ? e.target.closest('.chip[data-type]') : null;
+    if (chip) { setDraftType(chip.dataset.type); return; }
+
+    // フッタータブ
+    var tabBtn = e.target.closest ? e.target.closest('.tabbtn[data-tab]') : null;
+    if (tabBtn) { switchTab(tabBtn.dataset.tab); return; }
+
+    // 一覧のフィルター
+    var fBtn = e.target.closest ? e.target.closest('.filterbtn[data-filter]') : null;
+    if (fBtn) { setFilter(fBtn.dataset.filter); return; }
+
+    // 作成直後の結果カードのコピー
+    var copyBtn = e.target.closest ? e.target.closest('[data-copy]') : null;
+    if (copyBtn) {
+      var c1 = findContractOrLast(lastCreatedId);
+      if (!c1) { toast('コピー元が見つかりません'); return; }
+      if (copyBtn.dataset.copy === 'url') {
+        copyText(signUrlFor(c1.id, c1.token), 'resultUrlFallback');
+      } else if (copyBtn.dataset.copy === 'mail') {
+        copyText(buildMailText(c1), 'resultMailFallback');
+      } else {
+        copyText(c1.code, 'resultCodeFallback');
+      }
+      return;
+    }
+
+    // 一覧カードの操作（開閉・コピー・印刷）
+    var act = e.target.closest ? e.target.closest('[data-action]') : null;
+    if (act) {
+      var id = act.dataset.id;                 // 契約IDは文字列のまま扱う
+      var action = act.dataset.action;
+      if (action === 'toggle') { toggleCard(id); return; }
+      if (action === 'copy-url') {
+        var c4 = findContractOrLast(id);
+        if (c4) { copyText(signUrlFor(c4.id, c4.token), null); }
+        return;
+      }
+      if (action === 'copy-code') {
+        var c2 = findContractOrLast(id);
+        if (c2) { copyText(c2.code, null); }
+        return;
+      }
+      if (action === 'copy-mail') {
+        var c3 = findContractOrLast(id);
+        if (c3) { copyText(buildMailText(c3), null); }
+        return;
+      }
+      if (action === 'sendmail') { onSendMail(id, null); return; }
+      if (action === 'print') { printContract(id); return; }
+    }
+  });
+
+  /* --- 固定の要素 --- */
+  var btnPreview = $('btnPreview');
+  if (btnPreview) { btnPreview.addEventListener('click', onPreview); }
+
+  var btnCreate = $('btnCreate');
+  if (btnCreate) { btnCreate.addEventListener('click', onCreate); }
+
+  /* 作成直後の「この内容でメールを送る」 */
+  var btnSendMail = $('btnSendMail');
+  if (btnSendMail) {
+    btnSendMail.addEventListener('click', function () {
+      onSendMail(lastCreatedId, 'sendMailMsg');
+    });
+  }
+
+  /* 設定タブ */
+  var btnSaveKey = $('btnSaveKey');
+  if (btnSaveKey) { btnSaveKey.addEventListener('click', onSaveAdminKey); }
+
+  var btnClearKey = $('btnClearKey');
+  if (btnClearKey) { btnClearKey.addEventListener('click', onClearAdminKey); }
+
+  var setKeyInput = $('setKeyInput');
+  if (setKeyInput) {
+    setKeyInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); onSaveAdminKey(); }
+    });
+  }
+
+  var btnPing = $('btnPing');
+  if (btnPing) { btnPing.addEventListener('click', onPing); }
+
+  var btnVerify = $('btnVerifyCode');
+  if (btnVerify) { btnVerify.addEventListener('click', onVerifyCode); }
+
+  var codeInput = $('codeInput');
+  if (codeInput) {
+    codeInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') { e.preventDefault(); onVerifyCode(); }
+    });
+    codeInput.addEventListener('input', function () {
+      // 数字以外は落とす
+      this.value = String(this.value).replace(/[^0-9]/g, '').slice(0, 4);
+    });
+  }
+
+  var btnClear = $('btnClearSig');
+  if (btnClear) { btnClear.addEventListener('click', clearSignature); }
+
+  var btnSigMode = $('btnSigMode');
+  if (btnSigMode) {
+    btnSigMode.addEventListener('click', function () {
+      setSigMode(signCtx.mode === 'hand' ? 'auto' : 'hand');
+    });
+  }
+
+  var nameEl = $('signerName');
+  if (nameEl) { nameEl.addEventListener('input', onSignerNameInput); }
+
+  var agreeEl = $('agreeCheck');
+  if (agreeEl) { agreeEl.addEventListener('change', updateSignButton); }
+
+  var btnSign = $('btnSign');
+  if (btnSign) { btnSign.addEventListener('click', onSubmitSign); }
+
+  var btnDecline = $('btnDecline');
+  if (btnDecline) { btnDecline.addEventListener('click', onDecline); }
+
+  var btnPrintSigned = $('btnPrintSigned');
+  if (btnPrintSigned) {
+    btnPrintSigned.addEventListener('click', function () {
+      if (signCtx.contract) { printContract(signCtx.contract.id); }
+    });
+  }
+
+  var btnPrintDeclined = $('btnPrintDeclined');
+  if (btnPrintDeclined) {
+    btnPrintDeclined.addEventListener('click', function () {
+      if (signCtx.contract) { printContract(signCtx.contract.id); }
+    });
+  }
+
+  /* --- 確認モーダル --- */
+  var modalCancel = $('modalCancel');
+  if (modalCancel) { modalCancel.addEventListener('click', closeModal); }
+
+  var modalOk = $('modalOk');
+  if (modalOk) { modalOk.addEventListener('click', confirmModal); }
+
+  var modalBox = $('modal');
+  if (modalBox) {
+    // 背景をタップしたら閉じる（中身のクリックでは閉じない）
+    modalBox.addEventListener('click', function (e) {
+      if (e.target === modalBox) { closeModal(); }
+    });
+  }
+
+  document.addEventListener('keydown', function (e) {
+    var m = $('modal');
+    if (e.key === 'Escape' && m && !m.hidden) { closeModal(); }
+  });
+
+  /* --- 作成フォーム --- */
+  var titleEl = $('fTitle');
+  if (titleEl) {
+    titleEl.addEventListener('input', function () {
+      titleTouched = String(this.value).trim() !== '';
+    });
+  }
+
+  var partyEl = $('fPartyName');
+  if (partyEl) { partyEl.addEventListener('input', refreshDefaultTitle); }
+
+  var feeEl = $('fFeeType');
+  if (feeEl) {
+    feeEl.addEventListener('change', function () {
+      refreshAmountLabel();
+      hidePreviewAndResult();
+    });
+  }
+
+  // 入力を変えたらプレビューと結果は作り直してもらう
+  ['fTitle', 'fPartyName', 'fPartyEmail', 'fWork', 'fAmount', 'fStart', 'fEnd', 'fDeadline', 'fNote'].forEach(function (fid) {
+    var el = $(fid);
+    if (el) { el.addEventListener('input', hidePreviewAndResult); }
+  });
+}
+
+/* ---------------------------------------------------------------------------
+   起動
+--------------------------------------------------------------------------- */
+
+async function boot() {
+  bindEvents();
+
+  var docId = '';
+  var token = '';
+  try {
+    var q = new URLSearchParams(window.location.search);
+    docId = q.get('doc') || '';
+    token = q.get('t') || '';
+  } catch (e) {
+    console.error('[boot] URL の解析に失敗', e);
+    docId = '';
+    token = '';
+  }
+  docId = String(docId);      // 契約IDは文字列。Number() は通さない
+  token = String(token);
+
+  if (docId) {
+    /* B. 署名画面（相手が開く側）。
+       isSignScreen はスクリプトの先頭で決まっている＝合言葉は読まない。
+       当社の控えも画面に持ち込まない。 */
+    state.contracts = [];
+    await initSign(docId, token);
+    return;
+  }
+
+  await initAdmin();          // A. 管理画面（当社が使う側）
+}
+
+function startApp() {
+  boot().catch(function (e) {
+    console.error('[boot] 起動に失敗', e);
+    toast('起動に失敗しました');
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', startApp);
+} else {
+  startApp();
+}
+</script>
+</body>
+</html>
