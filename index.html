@@ -1900,7 +1900,8 @@ function typeLabel(key) {
 var COMPANY_NAME = '株式会社データパレード';
 
 /* 証明書に出す「契約作成者」（当社側）。運用に合わせて書き換えてよい */
-var CREATOR_NAME  = '株式会社データパレード 契約担当';
+var COMPANY_SIGNER = '株式会社データパレード　代表取締役　石井 亮介';  /* 契約書の署名欄に入る自社の名義 */
+var CREATOR_NAME  = '株式会社データパレード　代表取締役　石井 亮介';
 var CREATOR_EMAIL = 'info@data-parade.com';
 
 /* 本人確認の強さ。証明書の「セキュリティレベル」欄に出す */
@@ -1941,7 +1942,6 @@ function defaultTitleFor(type, partyName) {
 function buildContractText(c) {
   var party = c.partyName || '（相手先名 未入力）';
   var work  = c.workDesc  || '（業務内容 未入力）';
-  var mail  = c.partyEmail || '（未登録）';
   var start = formatDate(c.startDate);
   var end   = formatDate(c.endDate);
   var note  = c.note ? c.note : '（特になし）';
@@ -1999,9 +1999,8 @@ function buildContractText(c) {
       '',
       '本契約の成立を証するため、甲乙は本書を電磁的記録により作成し、それぞれ電子的な方法により合意の意思表示を行う。',
       '',
-      '甲：' + COMPANY_NAME,
-      '乙：' + party,
-      '　（連絡先：' + mail + '）'
+      '甲：' + COMPANY_SIGNER,
+      '乙：' + party
     ].join('\n');
   }
 
@@ -2048,9 +2047,8 @@ function buildContractText(c) {
       '',
       '以上',
       '',
-      '発注者：' + COMPANY_NAME,
-      '受注者：' + party,
-      '　（連絡先：' + mail + '）'
+      '発注者：' + COMPANY_SIGNER,
+      '受注者：' + party
     ].join('\n');
   }
 
@@ -2145,9 +2143,8 @@ function buildContractText(c) {
     '',
     '本契約の成立を証するため、甲乙は本書を電磁的記録により作成し、それぞれ電子的な方法により合意の意思表示を行う。',
     '',
-    '甲：' + COMPANY_NAME,
-    '乙：' + party,
-    '　（連絡先：' + mail + '）'
+    '甲：' + COMPANY_SIGNER,
+    '乙：' + party
   ]).join('\n');
 }
 
